@@ -1,0 +1,159 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")   // pooled — used at runtime (Vercel serverless)
+  directUrl = env("DIRECT_URL")     // direct (non-pooler) — used for migrations / db push
+}
+
+model BrandKit {
+  id        String    @id @default(cuid())
+  domain    String    @unique
+  website   String?
+  kit       Json
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  projects  Project[]
+}
+
+model Project {
+  id              String         @id @default(cuid())
+  name            String
+  clientUrl       String?
+  businessInfo    Json?
+  businessSummary Json?
+  logoUrl         String?
+  visionMatches   Json?
+  contentReferences Json?
+  /** When true, run Perplexity web research for every post (not only when context is thin). */
+  alwaysWebResearch Boolean        @default(false)
+  brandKitId      String?
+  brandKit        BrandKit?      @relation(fields: [brandKitId], references: [id])
+  createdAt       DateTime       @default(now())
+  conversations   Conversation[]
+  tasks           Task[]
+  uploadedImages  UploadedImage[]
+  jobs            Job[]
+}
+
+model Conversation {
+  id        String    @id @default(cuid())
+  projectId String
+  project   Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  messages  Message[]
+  createdAt DateTime  @default(now())
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  role           String
+  content        String
+  meta           Json?
+  createdAt      DateTime     @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+}
+
+model UploadedImage {
+  id              String   @id @default(cuid())
+  projectId       String
+  project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  blobUrl         String
+  mime            String
+  matchedProduct  String?
+  matchConfidence Float?
+  description     String?
+  referenceKind   String?
+  referenceMeta   Json?
+  createdAt       DateTime @default(now())
+}
+
+model Task {
+  id                  String           @id @default(cuid())
+  projectId           String
+  project             Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  title               String
+  subject             String
+  productInfo         Json?
+  businessInfo        Json?
+  businessSummary     Json?
+  logoUrl             String?
+  productSummary      Json?
+  productImageUrl     String?
+  sourceImages        Json?
+  status              TaskStatus       @default(NOT_STARTED)
+  statusLabel         String?
+  pendingQuestion     String?
+  agentState          Json?
+  caption             String?
+  imagePrompt         String?
+  graphicCopy         Json?
+  threadId            String?
+  orderIndex          Int
+  currentGenerationId String?
+  /** Per-post facts from photo card (text + optional context image extraction) */
+  userProductNotes    String?
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+  generations         Generation[]
+  captionRevisions    CaptionRevision[]
+}
+
+enum TaskStatus {
+  NOT_STARTED
+  AGENT_RUNNING
+  WRITING_CAPTION
+  WRITING_PROMPT
+  GENERATING_IMAGE
+  NEEDS_INFO
+  NEEDS_APPROVAL
+  CHANGES_REQUESTED
+  APPROVED
+  FAILED
+}
+
+model CaptionRevision {
+  id        String   @id @default(cuid())
+  taskId    String
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  caption   String
+  feedback  String?
+  createdAt DateTime @default(now())
+}
+
+model Generation {
+  id           String      @id @default(cuid())
+  taskId       String
+  task         Task        @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  generationId String      @unique
+  prompt       String
+  imagePath    String?
+  parentId     String?
+  parent       Generation? @relation("GenChain", fields: [parentId], references: [id])
+  children     Generation[] @relation("GenChain")
+  feedback     String?
+  changeType   String?
+  agentNote    String?
+  createdAt    DateTime    @default(now())
+}
+
+enum JobStatus {
+  queued
+  running
+  done
+  failed
+}
+
+model Job {
+  id        String    @id @default(cuid())
+  projectId String?
+  project   Project?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  type      String
+  taskId    String?
+  payload   Json
+  status    JobStatus @default(queued)
+  error     String?
+  createdAt DateTime  @default(now())
+}

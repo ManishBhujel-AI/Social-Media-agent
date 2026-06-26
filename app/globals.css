@@ -1,0 +1,39 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --foreground: #1e293b;
+}
+
+body {
+  color: var(--foreground);
+  font-family: var(--font-inter), Inter, system-ui, sans-serif;
+}
+
+/* Multi-layer mesh from Brewline design reference */
+.mesh-bg {
+  min-height: 100vh;
+  min-height: 100dvh;
+  background:
+    radial-gradient(820px 620px at 12% 8%, rgba(96, 135, 255, 0.3), transparent 60%),
+    radial-gradient(760px 680px at 88% 14%, rgba(140, 120, 255, 0.22), transparent 58%),
+    radial-gradient(900px 760px at 72% 96%, rgba(80, 170, 255, 0.2), transparent 60%),
+    radial-gradient(700px 600px at 8% 92%, rgba(120, 200, 255, 0.16), transparent 60%),
+    linear-gradient(160deg, #eef1f7, #e7ebf3);
+  background-attachment: fixed;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(30, 41, 59, 0.18);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
