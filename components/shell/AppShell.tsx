@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { MESH_BG } from "@/lib/design/tokens";
+import { conversationQuery } from "@/lib/conversations/conversationQuery";
 import type { BriefSummary } from "@/lib/types/brief";
 import { BriefRow } from "@/components/shell/BriefRow";
 import { ProjectStreamProvider } from "@/hooks/ProjectStreamProvider";
@@ -20,14 +21,14 @@ function isPipelineActive(statuses: Iterable<TaskStatus>): boolean {
 }
 
 const NAV = [
-  { key: "chat", label: "Brief & Chat", icon: "✦", href: (id: string) => `/project/${id}/chat` },
-  { key: "board", label: "Task Board", icon: "▦", href: (id: string) => `/project/${id}/board`, badge: "tasks" as const },
-  { key: "approve", label: "Approvals", icon: "✓", href: (id: string) => `/project/${id}/approve`, badge: "needs" as const },
-  { key: "settings", label: "Client Settings", icon: "⚙", href: (id: string) => `/project/${id}/settings` },
+  { key: "chat", label: "Chat", icon: "✦", segment: "chat" as const },
+  { key: "board", label: "Task Board", icon: "▦", segment: "board" as const, badge: "tasks" as const },
+  { key: "approve", label: "Approvals", icon: "✓", segment: "approve" as const, badge: "needs" as const },
+  { key: "settings", label: "Client Settings", icon: "⚙", segment: "settings" as const },
 ];
 
 const HEADERS: Record<string, { title: string; sub: string }> = {
-  chat: { title: "Brief & Chat", sub: "Tell the agent what to create" },
+  chat: { title: "Chat", sub: "Tell the agent what to create" },
   board: { title: "Task Board", sub: "Track every post through the pipeline" },
   approve: { title: "Approvals", sub: "Posts waiting on your review" },
   settings: { title: "Client Settings", sub: "View and edit the brand kit for this client" },
@@ -52,7 +53,7 @@ export function AppShell({
   children: React.ReactNode;
 }) {
   return (
-    <ProjectStreamProvider projectId={projectId}>
+    <Suspense fallback={null}>
       <AppShellInner
         projectId={projectId}
         projectName={projectName}
@@ -63,8 +64,22 @@ export function AppShell({
       >
         {children}
       </AppShellInner>
-    </ProjectStreamProvider>
+    </Suspense>
   );
+}
+
+function countsFetchUrl(projectId: string, conversationId: string | null): string {
+  const params = new URLSearchParams({ _: String(Date.now()) });
+  if (conversationId) params.set("conversation", conversationId);
+  return `/api/projects/${projectId}/counts?${params}`;
+}
+
+function navHref(projectId: string, segment: string, conversationId: string | null) {
+  const scope = conversationQuery(conversationId);
+  if (segment === "chat") {
+    return `/project/${projectId}/chat${scope}`;
+  }
+  return `/project/${projectId}/${segment}${scope}`;
 }
 
 function AppShellInner({
@@ -86,6 +101,8 @@ function AppShellInner({
 }) {
   const pathname = usePathname();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const conversationId = searchParams.get("conversation");
   const [creating, setCreating] = useState(false);
   const [localBriefs, setLocalBriefs] = useState(briefs);
   const [liveCounts, setLiveCounts] = useState({ taskCount, needsCount });
@@ -102,8 +119,17 @@ function AppShellInner({
     setPollCounts(isPipelineActive(initialTaskStatuses.map((t) => t.status)));
   }, [projectId, initialTaskStatuses, taskCount, needsCount]);
 
-  const onTaskEvent = useCallback((event: TaskStreamEvent) => {
-    const { taskId, status } = event.payload;
+  const onTaskEvent = useCallback(
+    (event: TaskStreamEvent) => {
+      if (
+        conversationId &&
+        event.payload.conversationId &&
+        event.payload.conversationId !== conversationId
+      ) {
+        return;
+      }
+
+      const { taskId, status } = event.payload;
     const prev = taskStatusRef.current.get(taskId);
 
     if (event.type === "task.created") {
@@ -130,9 +156,31 @@ function AppShellInner({
       return { ...c, needsCount: nextNeeds };
     });
     setPollCounts(isPipelineActive(taskStatusRef.current.values()));
-  }, []);
+    },
+    [conversationId]
+  );
 
   const { agentActivity } = useProjectStream(projectId, { onTaskEvent });
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const refreshCounts = async () => {
+      try {
+        const res = await fetch(countsFetchUrl(projectId, conversationId), {
+          cache: "no-store",
+        });
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as { taskCount: number; needsCount: number };
+        setLiveCounts({ taskCount: data.taskCount, needsCount: data.needsCount });
+        setPollCounts(data.taskCount > 0);
+      } catch {
+        /* ignore */
+      }
+    };
+
+    void refreshCounts();
+  }, [projectId, conversationId]);
 
   useEffect(() => {
     if (!pollCounts && !agentActivity) return;
@@ -141,7 +189,7 @@ function AppShellInner({
 
     const refreshCounts = async () => {
       try {
-        const res = await fetch(`/api/projects/${projectId}/counts?_=${Date.now()}`, {
+        const res = await fetch(countsFetchUrl(projectId, conversationId), {
           cache: "no-store",
         });
         if (!res.ok || cancelled) return;
@@ -158,7 +206,7 @@ function AppShellInner({
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [projectId, pollCounts, agentActivity]);
+  }, [projectId, pollCounts, agentActivity, conversationId]);
 
   useEffect(() => {
     setLocalBriefs(briefs);
@@ -189,13 +237,13 @@ function AppShellInner({
       const res = await fetch("/api/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: "New brief" }),
+        body: JSON.stringify({ name: "New workspace" }),
       });
-      if (!res.ok) throw new Error(`Failed to create project: ${res.status}`);
+      if (!res.ok) throw new Error(`Failed to create workspace: ${res.status}`);
       const project = await res.json();
       router.push(`/project/${project.id}/chat`);
     } catch (err) {
-      console.error("New brief failed", err);
+      console.error("New workspace failed", err);
       setCreating(false);
     }
   }
@@ -212,7 +260,8 @@ function AppShellInner({
   const header = HEADERS[screen] ?? HEADERS.chat;
 
   return (
-    <div className={`fixed inset-0 flex overflow-hidden text-slate-800 ${MESH_BG}`}>
+    <ProjectStreamProvider projectId={projectId} conversationId={conversationId}>
+      <div className={`fixed inset-0 flex overflow-hidden text-slate-800 ${MESH_BG}`}>
       <aside className="relative z-[2] w-[248px] flex-none flex flex-col px-4 py-[22px] bg-white/55 backdrop-blur-[22px] backdrop-saturate-150 border-r border-white/70 min-h-0">
         <div className="flex items-center gap-[11px] px-2 pb-[18px] flex-none">
           <div className="w-[34px] h-[34px] rounded-[11px] flex-none bg-gradient-to-br from-violet-500 to-violet-800 shadow-[0_6px_16px_rgba(124,58,237,0.4)] flex items-center justify-center">
@@ -226,8 +275,8 @@ function AppShellInner({
 
         <nav className="flex flex-col gap-[3px] flex-none">
           {NAV.map((n) => {
-            const href = n.href(projectId);
-            const active = pathname.startsWith(href);
+            const href = navHref(projectId, n.segment, conversationId);
+            const active = pathname.startsWith(`/project/${projectId}/${n.segment}`);
             const badge =
               "badge" in n && n.badge === "tasks"
                 ? liveCounts.taskCount
@@ -260,7 +309,7 @@ function AppShellInner({
 
         <div className="mt-4 flex-1 min-h-0 flex flex-col">
           <div className="px-2 pb-2 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
-            Briefs
+            Workspaces
           </div>
           <div className="flex-1 overflow-y-auto flex flex-col gap-0.5 pr-0.5 -mr-0.5">
             {localBriefs.map((brief) => (
@@ -307,12 +356,13 @@ function AppShellInner({
               disabled={creating}
               className="px-4 py-2 rounded-[11px] text-[13px] font-semibold text-white cursor-pointer bg-gradient-to-br from-violet-500 to-violet-800 shadow-[0_6px_16px_rgba(124,58,237,0.34)] disabled:opacity-60"
             >
-              {creating ? "Creating…" : "New brief"}
+              {creating ? "Creating…" : "New workspace"}
             </button>
           </div>
         </header>
         <div className="flex-1 min-h-0 overflow-auto">{children}</div>
       </main>
     </div>
+    </ProjectStreamProvider>
   );
 }

@@ -7,10 +7,9 @@ import { resolveSourceImages } from "@/lib/ai/resolveSourceImages";
 import { setProjectLogo } from "@/lib/ai/agents/projectLogo";
 import {
   addContentReference,
-  addContentReferences,
   type ContentReferenceKind,
 } from "./references";
-import { splitCaptionExamples } from "./splitCaptionExamples";
+import { appendToCaptionCorpus } from "./captionCorpus";
 
 export type IngestResult = {
   saved: boolean;
@@ -134,40 +133,17 @@ export async function ingestUserReference(params: {
   if (trimmed && trimmed.length > SHORT_REPLY_MAX) {
     const classified = await classifyPastedText(trimmed, tasks);
     if (classified.confidence >= 0.5) {
-      if (classified.kind === "caption_example") {
-        const segments = await splitCaptionExamples(trimmed, tasks);
-        if (segments.length > 1) {
-          await addContentReferences(
-            params.projectId,
-            segments.map((segment) => ({
-              kind: "caption_example" as const,
-              scope: segment.taskId ? ("task" as const) : ("project" as const),
-              taskId: segment.taskId,
-              productHint: segment.productName,
-              text: segment.caption,
-              summary: segment.summary,
-              sourceMessageId: params.messageId,
-            }))
-          );
-          agentNotes.push(
-            `Stored ${segments.length} client-approved caption examples (${segments.map((s) => s.productName).join(", ")}).`
-          );
-          saved = true;
-        } else {
-          const segment = segments[0];
-          await addContentReference(params.projectId, {
-            kind: "caption_example",
-            scope: segment?.taskId ? "task" : classified.scope,
-            taskId: segment?.taskId ?? classified.taskId,
-            productHint: segment?.productName,
-            text: segment?.caption ?? trimmed,
-            summary: segment?.summary ?? classified.summary,
-            sourceMessageId: params.messageId,
-          });
-          const scopeLabel = segment?.productName ?? classified.summary;
-          agentNotes.push(`User paste stored as caption example for ${scopeLabel}.`);
-          saved = true;
-        }
+      if (classified.kind === "caption_example" || classified.kind === "copy_snippet") {
+        await appendToCaptionCorpus(params.projectId, trimmed);
+        agentNotes.push(
+          classified.kind === "caption_example"
+            ? "User paste appended to client caption corpus."
+            : "User paste appended to client caption corpus as background context."
+        );
+        saved = true;
+      } else if (classified.kind === "brand_voice") {
+        // Voice is inferred from the caption corpus — do not store separately.
+        agentNotes.push("Style/voice notes noted — add example captions to Past captions in settings for best results.");
       } else {
         await addContentReference(params.projectId, {
           kind: classified.kind,
@@ -237,6 +213,20 @@ export async function saveContentReferenceFromTool(
     styleNotes?: string;
   }
 ): Promise<string> {
+  if (args.kind === "caption_example" || args.kind === "copy_snippet") {
+    if (args.text?.trim()) {
+      await appendToCaptionCorpus(projectId, args.text.trim());
+    }
+    return JSON.stringify({ status: "saved", target: "captionCorpus" });
+  }
+
+  if (args.kind === "brand_voice") {
+    return JSON.stringify({
+      status: "skipped",
+      message: "Brand voice is inferred from past captions — add them in Client Settings → Past captions.",
+    });
+  }
+
   await addContentReference(projectId, {
     id: createId(),
     kind: args.kind,

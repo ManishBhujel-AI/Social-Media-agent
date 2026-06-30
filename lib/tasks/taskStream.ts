@@ -1,11 +1,12 @@
 import type { Task, TaskStatus } from "@prisma/client";
 
 export type TaskWithMeta = Task & {
-  generations?: { imagePath: string | null }[];
+  generations?: { imagePath: string | null; prompt?: string | null }[];
 };
 
 export type TaskStreamPayload = {
   taskId: string;
+  conversationId?: string | null;
   status: TaskStatus;
   statusLabel?: string | null;
   pendingQuestion?: string | null;
@@ -20,6 +21,7 @@ export function taskToStreamPayload(task: Task): TaskStreamPayload {
   const state = task.agentState as { preImageRequest?: boolean } | null;
   return {
     taskId: task.id,
+    conversationId: task.conversationId,
     status: task.status,
     statusLabel: task.statusLabel,
     pendingQuestion: task.pendingQuestion,
@@ -64,6 +66,7 @@ export function mergeTaskStreamEvent(
   const stub: TaskWithMeta = {
     id: payload.taskId,
     projectId: "",
+    conversationId: null,
     title: payload.title ?? "New post",
     subject: payload.subject ?? payload.title ?? "Post",
     status: payload.status,

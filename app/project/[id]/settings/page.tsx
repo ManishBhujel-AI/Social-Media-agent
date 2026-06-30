@@ -1,6 +1,7 @@
 import { getForProject, getProjectWithBrandKit } from "@/lib/brandKit/store";
 import { BrandKitForm } from "@/components/settings/BrandKitForm";
-import { ProjectResearchSettings } from "@/components/settings/ProjectResearchSettings";
+import { CaptionCorpusPanel } from "@/components/settings/CaptionCorpusPanel";
+import { SettingsWriteLoopHarness } from "@/components/settings/SettingsWriteLoopHarness";
 import { PAGE_PADDING } from "@/lib/design/tokens";
 import { notFound } from "next/navigation";
 
@@ -16,15 +17,12 @@ export default async function SettingsPage({ params }: { params: Promise<{ id: s
   const initial = {
     brandKit,
     hasClientUrl: Boolean(project.clientUrl?.trim()),
-    alwaysWebResearch: project.alwaysWebResearch,
   };
 
   return (
     <div className={`${PAGE_PADDING} flex flex-col items-center`}>
-      <ProjectResearchSettings
-        projectId={id}
-        initialAlwaysWebResearch={project.alwaysWebResearch}
-      />
+      <SettingsWriteLoopHarness projectId={id} />
+      <CaptionCorpusPanel projectId={id} />
       <BrandKitForm
         projectId={id}
         initial={initial}

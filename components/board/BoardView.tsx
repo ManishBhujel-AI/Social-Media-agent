@@ -24,9 +24,11 @@ const COLUMNS = [
 
 export function BoardView({
   projectId,
+  conversationId,
   initialTasks,
 }: {
   projectId: string;
+  conversationId?: string | null;
   initialTasks: TaskWithMeta[];
 }) {
   const router = useRouter();
@@ -42,10 +44,13 @@ export function BoardView({
   useEffect(() => {
     if (kickedRecoveryRef.current) return;
     kickedRecoveryRef.current = true;
-    void fetch(`/api/projects/${projectId}/kick-pipeline`, { method: "POST" })
+    const kickUrl = conversationId
+      ? `/api/projects/${projectId}/kick-pipeline?conversation=${conversationId}`
+      : `/api/projects/${projectId}/kick-pipeline`;
+    void fetch(kickUrl, { method: "POST" })
       .then(() => refresh())
       .catch(() => {});
-  }, [projectId, refresh]);
+  }, [projectId, conversationId, refresh]);
 
   const onTaskEvent = useCallback(
     (event: { type: "task.created" | "task.updated"; payload: Parameters<typeof mergeTaskStreamEvent>[2] }) => {
@@ -109,7 +114,7 @@ export function BoardView({
       <div className="flex flex-col items-center justify-center min-h-[50vh] px-8 text-center">
         <div className="text-[15px] font-semibold text-slate-700">No posts yet</div>
         <p className="mt-2 text-sm text-slate-500 max-w-md">
-          Start in Brief &amp; Chat — once the agent creates your posts, they&apos;ll show up here
+          Start in Chat — once the agent creates your posts, they&apos;ll show up here
           as they move through the pipeline.
         </p>
       </div>

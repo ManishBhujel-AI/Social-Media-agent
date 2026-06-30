@@ -110,7 +110,7 @@ export function taskSubLabel(
     case "NEEDS_INFO":
       return "Waiting for photo…";
     case "FAILED":
-      return "Failed — retry";
+      return opts?.statusLabel ?? "Failed — retry";
     default:
       return null;
   }

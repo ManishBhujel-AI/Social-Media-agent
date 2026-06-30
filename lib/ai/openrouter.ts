@@ -223,16 +223,82 @@ export async function parseOpenRouterChatStream(
   };
 }
 
-export async function openRouterChatText(params: {
+export type OpenRouterCitation = {
+  url: string;
+  title?: string;
+};
+
+type OpenRouterAnnotation = {
+  type?: string;
+  url?: string;
+  url_citation?: {
+    url?: string;
+    title?: string;
+  };
+};
+
+function normalizeCitationUrl(url: string): string | null {
+  const trimmed = url.trim();
+  if (!trimmed || !/^https?:\/\//i.test(trimmed)) return null;
+  return trimmed;
+}
+
+/** Extract deduplicated URL citations from an OpenRouter chat completion response. */
+export function extractOpenRouterCitations(
+  message: { annotations?: OpenRouterAnnotation[] } | null | undefined,
+  topLevelCitations?: string[] | null
+): OpenRouterCitation[] {
+  const seen = new Set<string>();
+  const citations: OpenRouterCitation[] = [];
+
+  const add = (url: string | undefined, title?: string) => {
+    const normalized = url ? normalizeCitationUrl(url) : null;
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    const trimmedTitle = title?.trim();
+    citations.push({
+      url: normalized,
+      ...(trimmedTitle ? { title: trimmedTitle } : {}),
+    });
+  };
+
+  for (const url of topLevelCitations ?? []) {
+    add(url);
+  }
+
+  for (const annotation of message?.annotations ?? []) {
+    if (annotation.type && annotation.type !== "url_citation") continue;
+    add(annotation.url_citation?.url ?? annotation.url, annotation.url_citation?.title);
+  }
+
+  return citations;
+}
+
+export async function openRouterChatTextWithCitations(params: {
   model?: string;
   messages: ChatMessage[];
   max_tokens?: number;
-}): Promise<string> {
+}): Promise<{ text: string; citations: OpenRouterCitation[] }> {
   const res = await openRouterChat(params);
   if (!res.ok) {
     const text = await res.text();
     throw new RetryableError(`OpenRouter error ${res.status}: ${text}`);
   }
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content ?? "";
+  const data = (await res.json()) as {
+    choices?: Array<{ message?: { content?: string; annotations?: OpenRouterAnnotation[] } }>;
+    citations?: string[];
+  };
+  const message = data.choices?.[0]?.message;
+  const text = typeof message?.content === "string" ? message.content : "";
+  const citations = extractOpenRouterCitations(message, data.citations);
+  return { text, citations };
+}
+
+export async function openRouterChatText(params: {
+  model?: string;
+  messages: ChatMessage[];
+  max_tokens?: number;
+}): Promise<string> {
+  const { text } = await openRouterChatTextWithCitations(params);
+  return text;
 }

@@ -8,17 +8,15 @@ import { analyzeImages } from "@/lib/ai/agents/visionAgent";
 import { runPostAgent, resumePostAgent, continuePostAgentAfterImageRequest, continuePostAgentFromSavedState } from "@/lib/ai/agents/postAgent";
 import { isPreImageRequestState } from "@/lib/ai/agents/postImageRequest";
 import { updateTaskStatus, emitTaskDeliverableUpdated } from "@/lib/tasks/taskEvents";
-import { enqueueNextTask } from "./pipeline";
-import {
-  advanceImageCollectionQueue,
-  filterNotStartedTaskIds,
-} from "./pipelineGate";
+import { advanceImageCollectionQueue } from "./pipelineGate";
 import { isRetryable } from "@/lib/ai/errors";
 import { isTransientConnectionError } from "@/lib/db/transientRetry";
 import type { TaskStatus } from "@prisma/client";
+import { formatTaskFailureLabel } from "@/lib/tasks/failureLabel";
 
 async function failTask(taskId: string, error: string) {
-  await updateTaskStatus(taskId, "FAILED", { statusLabel: "Failed — retry" });
+  const statusLabel = formatTaskFailureLabel(error);
+  await updateTaskStatus(taskId, "FAILED", { statusLabel });
   const task = await prisma.task.findUnique({ where: { id: taskId } });
   if (task) {
     await emitProjectEvent({
@@ -27,6 +25,31 @@ async function failTask(taskId: string, error: string) {
       payload: { taskId, error },
     });
   }
+}
+
+/** Show the next photo card unless this task is still waiting on its own upload. */
+async function advanceQueueUnlessPhotoPause(
+  projectId: string | undefined,
+  taskId: string,
+  result: { done: boolean; paused: boolean }
+): Promise<void> {
+  if (!projectId) return;
+  if (result.paused) {
+    const task = await prisma.task.findUnique({
+      where: { id: taskId },
+      select: { agentState: true, conversationId: true },
+    });
+    if (isPreImageRequestState(task?.agentState)) return;
+    const scope = task?.conversationId ? { conversationId: task.conversationId } : undefined;
+    await advanceImageCollectionQueue(projectId, { force: true, scope });
+    return;
+  }
+  const task = await prisma.task.findUnique({
+    where: { id: taskId },
+    select: { conversationId: true },
+  });
+  const scope = task?.conversationId ? { conversationId: task.conversationId } : undefined;
+  await advanceImageCollectionQueue(projectId, { force: true, scope });
 }
 
 export async function processJob(name: string, data: Record<string, unknown>) {
@@ -79,27 +102,23 @@ export async function processJob(name: string, data: Record<string, unknown>) {
             where: { id: taskId },
             data: { agentState: state as object },
           });
-          if (!photoPause && task?.projectId) {
-            await advanceImageCollectionQueue(task.projectId, { force: true });
-          }
+          await advanceQueueUnlessPhotoPause(task?.projectId, taskId, result);
           break;
         }
-        if (result.done) {
-          const task = await prisma.task.findUnique({ where: { id: taskId } });
-          if (task?.projectId) {
-            await advanceImageCollectionQueue(task.projectId, { force: true });
-          }
-        }
-        if (result.done && remainingTaskIds?.length) {
-          const still = await filterNotStartedTaskIds(remainingTaskIds);
-          if (still.length) await enqueueNextTask(still);
-        }
+        const taskAfter = await prisma.task.findUnique({ where: { id: taskId } });
+        await advanceQueueUnlessPhotoPause(taskAfter?.projectId, taskId, result);
       } catch (err) {
         if (isRetryable(err) || isTransientConnectionError(err)) throw err;
         await failTask(taskId, String(err));
-        if (remainingTaskIds?.length) {
-          const still = await filterNotStartedTaskIds(remainingTaskIds);
-          if (still.length) await enqueueNextTask(still);
+        const failedTask = await prisma.task.findUnique({
+          where: { id: taskId },
+          select: { projectId: true, conversationId: true },
+        });
+        if (failedTask?.projectId) {
+          const scope = failedTask.conversationId
+            ? { conversationId: failedTask.conversationId }
+            : undefined;
+          await advanceImageCollectionQueue(failedTask.projectId, { force: true, scope });
         }
       }
       break;
@@ -138,23 +157,18 @@ export async function processJob(name: string, data: Record<string, unknown>) {
             where: { id: taskId },
             data: { agentState: state as object },
           });
-          if (projectId) {
-            await advanceImageCollectionQueue(projectId, { force: true });
-          }
+          await advanceQueueUnlessPhotoPause(projectId, taskId, result);
           break;
         }
-        if (result.done && remainingTaskIds.length && !wasPreImage) {
-          const still = await filterNotStartedTaskIds(remainingTaskIds);
-          if (still.length) await enqueueNextTask(still);
-        }
-        if (projectId) {
-          await advanceImageCollectionQueue(projectId, { force: true });
-        }
+        await advanceQueueUnlessPhotoPause(projectId, taskId, result);
       } catch (err) {
         if (isRetryable(err) || isTransientConnectionError(err)) throw err;
         await failTask(taskId, String(err));
         if (projectId) {
-          await advanceImageCollectionQueue(projectId, { force: true });
+          const scope = taskBefore?.conversationId
+            ? { conversationId: taskBefore.conversationId }
+            : undefined;
+          await advanceImageCollectionQueue(projectId, { force: true, scope });
         }
       }
       break;

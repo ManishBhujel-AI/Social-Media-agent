@@ -8,11 +8,19 @@ import { isUsableProductImage } from "../productImageQuality";
 import {
   descriptionQuestion,
   hasMarketingReadySummary,
+  hasUsableWebResearch,
   isReliableProductDescription,
+  previewProductInfoForAgent,
   type ProductSummary,
 } from "../productContext";
 import { enrichProductMarketingBrief } from "../research/marketingBrief";
-import { collectResearchContextFromReferences, getReferencesForTask } from "@/lib/content/references";
+import { getCaptionCorpus, extractProductRelevantFromCorpus } from "@/lib/content/captionCorpus";
+import {
+  collectMarketingResearchFromReferences,
+  getReferencesForTask,
+} from "@/lib/content/references";
+import { getForProject } from "@/lib/brandKit/store";
+import { buildClientResearchContext } from "@/lib/brandKit/clientResearchContext";
 import { describeProductImage, extractProductContextFromImage } from "./visionAgent";
 import { resolveSourceImages } from "@/lib/ai/resolveSourceImages";
 
@@ -42,8 +50,9 @@ export type FindProductResult =
     }
   | { found: false; confidence: number; reason: string };
 
-const FIND_PRODUCT_BUDGET_MS = 14_000;
+const FIND_PRODUCT_BUDGET_MS = 45_000;
 const FIND_PRODUCT_WITH_IMAGES_BUDGET_MS = 30_000;
+const RESEARCH_SETTLE_WAIT_MS = 12_000;
 const MAX_PRODUCT_PAGES = 2;
 
 const NO_IMAGE_QUESTION =
@@ -76,6 +85,71 @@ function buildNeedsDescriptionResult(
   };
 }
 
+/** Agent-facing JSON — omits full webResearchNotes; writeCaption reads saved productSummary from DB. */
+export function serializeFindProductResultForAgent(result: FindProductResult): object {
+  if (!result.found) {
+    return {
+      found: false,
+      readyForCaption: false,
+      confidence: result.confidence,
+      reason: result.reason,
+    };
+  }
+
+  const ready = hasMarketingReadySummary(result.summary);
+  const notesChars = result.summary.webResearchNotes?.trim().length ?? 0;
+  const compact = {
+    name: result.summary.name,
+    productInfoPreview: previewProductInfoForAgent(result.summary),
+    webResearchNotesChars: notesChars,
+    marketingSource: result.summary.marketingSource,
+    perplexityUsed: result.summary.perplexityUsed ?? false,
+  };
+
+  if ("needsDescription" in result && result.needsDescription) {
+    return {
+      found: true,
+      readyForCaption: false,
+      needsDescription: true,
+      suggestedQuestion: result.suggestedQuestion,
+      summary: compact,
+      imageUrl: result.imageUrl,
+      imageSource: result.imageSource,
+    };
+  }
+
+  if ("noUsableImage" in result && result.noUsableImage) {
+    return {
+      found: true,
+      readyForCaption: ready,
+      noUsableImage: true,
+      reason: result.reason,
+      suggestedQuestion: result.suggestedQuestion,
+      summary: compact,
+      ...(ready
+        ? { nextStep: "Product info is ready — after the user uploads a photo, call writeCaption() then makeGraphic()." }
+        : {}),
+    };
+  }
+
+  const withImage = result as Extract<FindProductResult, { imageUrl: string }>;
+  return {
+    found: true,
+    readyForCaption: ready,
+    needsDescription: false,
+    productName: result.summary.name,
+    productInfoSource: result.summary.marketingSource ?? "unknown",
+    webResearchNotesChars: notesChars,
+    hasUsableWebResearch: hasUsableWebResearch(result.summary.webResearchNotes),
+    productInfoPreview: compact.productInfoPreview,
+    imageUrl: withImage.imageUrl,
+    imageSource: withImage.imageSource,
+    nextStep: ready
+      ? "Call writeCaption() then makeGraphic() now. Do NOT call askUser — product info is already saved."
+      : undefined,
+  };
+}
+
 async function persistProductSummary(
   taskId: string,
   summary: ProductSummary,
@@ -88,6 +162,39 @@ async function persistProductSummary(
       ...(imageUrl !== undefined ? { productImageUrl: imageUrl } : {}),
     },
   });
+}
+
+async function resolveProductResearchHints(
+  projectId: string,
+  taskId: string,
+  productName: string
+): Promise<string> {
+  const [corpus, taskRefs, brandKitView] = await Promise.all([
+    getCaptionCorpus(projectId),
+    getReferencesForTask(projectId, taskId),
+    getForProject(projectId),
+  ]);
+
+  const parts: string[] = [];
+
+  const productCorpus = extractProductRelevantFromCorpus(corpus, productName);
+  if (productCorpus) {
+    parts.push(
+      `Past captions mentioning this product (facts only — not a substitute for product research):\n${productCorpus}`
+    );
+  }
+
+  const snippetContext = collectMarketingResearchFromReferences(
+    taskRefs.filter((r) => r.kind === "copy_snippet")
+  );
+  if (snippetContext.trim()) parts.push(snippetContext);
+
+  if (brandKitView?.kit) {
+    const ctx = buildClientResearchContext(brandKitView.kit, productName);
+    if (ctx.productNote) parts.push(`Product note: ${ctx.productNote}`);
+  }
+
+  return parts.join("\n\n");
 }
 
 export async function finalizeSummary(
@@ -104,26 +211,33 @@ export async function finalizeSummary(
     where: { id: taskId },
     select: {
       userProductNotes: true,
-      project: { select: { id: true, alwaysWebResearch: true } },
+      project: { select: { id: true } },
     },
   });
 
-  let extraContext = "";
+  let clientReferencesContext = "";
   const projectId = opts.projectId ?? taskRow?.project.id;
   if (projectId) {
-    const refs = await getReferencesForTask(projectId, taskId);
-    extraContext = collectResearchContextFromReferences(refs);
+    clientReferencesContext = await resolveProductResearchHints(
+      projectId,
+      taskId,
+      summary.name
+    );
   }
-  const notes = taskRow?.userProductNotes?.trim();
-  if (notes) {
-    extraContext = extraContext ? `${extraContext}\n\n${notes}` : notes;
-  }
+
+  const brandKitView = projectId ? await getForProject(projectId) : null;
+  const brandKitContext = brandKitView
+    ? buildClientResearchContext(brandKitView.kit, summary.name)
+    : undefined;
+
+  const userProductNotes = taskRow?.userProductNotes?.trim() || undefined;
 
   const enriched = await enrichProductMarketingBrief(summary, {
     clientUrl: opts.clientUrl,
     businessSummary: opts.businessSummary,
-    extraContext: extraContext || undefined,
-    forceWebResearch: taskRow?.project.alwaysWebResearch ?? false,
+    brandKitContext,
+    clientReferencesContext: clientReferencesContext || undefined,
+    userProductNotes,
   });
   await persistProductSummary(taskId, enriched, opts.imageUrl);
   return enriched;
@@ -137,15 +251,14 @@ async function tryBriefFromSavedContext(
     clientUrl?: string | null;
     businessSummary?: unknown;
     projectId?: string;
-  },
-  imageUrl?: string | null
-): Promise<ProductSummary | null> {
-  const enriched = await finalizeSummary(
+    imageUrl?: string | null;
+  }
+): Promise<ProductSummary> {
+  return finalizeSummary(
     taskId,
     { name: productName, description: "", confidence: 0 },
-    { ...enrichOpts, imageUrl }
+    enrichOpts
   );
-  return hasMarketingReadySummary(enriched) ? enriched : null;
 }
 
 export async function mergeAndPersistUserProductNotes(params: {
@@ -183,24 +296,46 @@ export async function mergeAndPersistUserProductNotes(params: {
 export async function prepareTaskImageSubmit(params: {
   projectId: string;
   taskId: string;
-  imageIds: string[];
+  imageIds?: string[];
   productNotes?: string;
   contextImageId?: string;
   message?: string;
 }): Promise<string> {
-  const urls = await resolveSourceImages(params.projectId, params.imageIds);
-  if (!urls.length) {
-    return JSON.stringify({ choice: "upload", message: "User uploaded product photos." });
-  }
+  const notes = params.productNotes?.trim() ?? "";
+  const urls = params.imageIds?.length
+    ? await resolveSourceImages(params.projectId, params.imageIds)
+    : [];
 
   const task = await prisma.task.findUniqueOrThrow({ where: { id: params.taskId } });
+
+  if (params.imageIds?.length && !urls.length) {
+    throw new Error(
+      "Uploaded photos could not be found — please try uploading again before submitting."
+    );
+  }
+
+  if (!urls.length) {
+    await prisma.task.update({
+      where: { id: params.taskId },
+      data: {
+        ...(notes ? { userProductNotes: notes } : {}),
+      },
+    });
+    return JSON.stringify({
+      choice: "generate",
+      message: params.message?.trim() || notes || "User chose to design from scratch.",
+      description: notes || undefined,
+      userNotes: notes || undefined,
+      pendingContextImageId: params.contextImageId,
+    });
+  }
+
   const existing = (task.sourceImages as string[] | null) ?? [];
   const mergedUrls = [...existing];
   for (const url of urls) {
     if (!mergedUrls.includes(url)) mergedUrls.push(url);
   }
 
-  const notes = params.productNotes?.trim() ?? "";
   await prisma.task.update({
     where: { id: params.taskId },
     data: {
@@ -274,7 +409,6 @@ export async function enrichSummaryFromUserImage(
     return {
       name: productName,
       description: uploaded.description,
-      marketingBrief: uploaded.description,
       confidence: uploaded.matchConfidence ?? 0.75,
       descriptionSource: "planning",
       marketingSource: "planning",
@@ -367,7 +501,6 @@ export async function applyUserProductDescription(
     ...existing,
     name: productName,
     description: description.trim(),
-    marketingBrief: description.trim(),
     confidence: 1,
     descriptionSource: "user",
     marketingSource: "user",
@@ -382,6 +515,79 @@ export async function applyUserProductDescription(
   return (refreshed.productSummary as ProductSummary) ?? summary;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Research may finish and persist just after a time-budget fallback — read DB before asking the user. */
+export async function reconcileFindProductResult(
+  taskId: string,
+  result: FindProductResult
+): Promise<FindProductResult> {
+  if (!("needsDescription" in result && result.needsDescription)) {
+    return result;
+  }
+
+  const task = await prisma.task.findUnique({
+    where: { id: taskId },
+    select: {
+      productSummary: true,
+      sourceImages: true,
+      productImageUrl: true,
+    },
+  });
+
+  const summary = (task?.productSummary as ProductSummary | null) ?? result.summary;
+  if (!hasMarketingReadySummary(summary)) {
+    return result;
+  }
+
+  const images = (task?.sourceImages as string[] | null) ?? [];
+  if (images.length > 0) {
+    return {
+      found: true,
+      summary,
+      imageUrl: images[0],
+      imageSource: "user",
+    };
+  }
+
+  if (task?.productImageUrl) {
+    return {
+      found: true,
+      summary,
+      imageUrl: task.productImageUrl,
+      imageSource: "site",
+    };
+  }
+
+  return buildNoImageResult(
+    summary,
+    "Product info found but no usable image on the website (too small, icon, or missing)"
+  );
+}
+
+async function waitForPersistedMarketingResearch(
+  taskId: string,
+  result: FindProductResult
+): Promise<FindProductResult> {
+  if (!("needsDescription" in result && result.needsDescription)) {
+    return result;
+  }
+
+  const deadline = Date.now() + RESEARCH_SETTLE_WAIT_MS;
+  let latest = result;
+  while (Date.now() < deadline) {
+    latest = await reconcileFindProductResult(taskId, latest);
+    if (!("needsDescription" in latest && latest.needsDescription)) {
+      return latest;
+    }
+    await sleep(750);
+  }
+
+  return reconcileFindProductResult(taskId, latest);
+}
+
 export async function findProduct(
   taskId: string,
   productName: string
@@ -394,7 +600,7 @@ export async function findProduct(
   const budgetMs =
     imageCount > 0 ? FIND_PRODUCT_WITH_IMAGES_BUDGET_MS : FIND_PRODUCT_BUDGET_MS;
 
-  return withTimeBudget(
+  const timed = await withTimeBudget(
     budgetMs,
     () => findProductInner(taskId, productName),
     buildNeedsDescriptionResult({
@@ -403,6 +609,8 @@ export async function findProduct(
       confidence: 0,
     })
   );
+
+  return waitForPersistedMarketingResearch(taskId, timed);
 }
 
 async function findProductInner(
@@ -425,16 +633,14 @@ async function findProductInner(
   if (existingImages.length > 0) {
     const imageUrl = existingImages[0];
 
-    const fromSavedContext = await tryBriefFromSavedContext(
-      taskId,
-      productName,
-      enrichOpts,
-      imageUrl
-    );
-    if (fromSavedContext) {
+    const enrichedFromContext = await tryBriefFromSavedContext(taskId, productName, {
+      ...enrichOpts,
+      imageUrl,
+    });
+    if (hasMarketingReadySummary(enrichedFromContext)) {
       return {
         found: true,
-        summary: fromSavedContext,
+        summary: enrichedFromContext,
         imageUrl,
         imageSource: "user",
       };
@@ -446,7 +652,10 @@ async function findProductInner(
       existingImages,
       existingSummary
     );
-    summary = await finalizeSummary(taskId, summary, { ...enrichOpts, imageUrl });
+    summary = await finalizeSummary(taskId, summary, {
+      ...enrichOpts,
+      imageUrl,
+    });
 
     if (!hasMarketingReadySummary(summary)) {
       return buildNeedsDescriptionResult(summary, { imageUrl, imageSource: "user" });

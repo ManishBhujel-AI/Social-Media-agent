@@ -29,6 +29,10 @@ export function createEmptyBrandKitData(): BrandKitData {
       aspectRatio: "default",
     },
     skipped: {},
+    clientPreferences: [],
+    productNotes: {},
+    secondaryContacts: [],
+    settingsChangelog: [],
   };
 }
 

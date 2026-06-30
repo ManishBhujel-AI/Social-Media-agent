@@ -2,7 +2,7 @@ import { prisma } from "@/lib/db/prisma";
 import type { BusinessInfo, BusinessSummary } from "@/lib/ai/agents/summarizeBusiness";
 import { summarizeBusiness } from "@/lib/ai/agents/summarizeBusiness";
 import type { PageFetchCache } from "@/lib/web/pageFetchCache";
-import { normalizeDomain } from "./domain";
+import { normalizeDomain, isProjectScopedDomain } from "./domain";
 import {
   getBusinessSummaryCache,
   type BrandKitStoredPayload,
@@ -132,13 +132,14 @@ export async function ensureBrandKit(
 
   const existingByDomain = await findByDomain(domain);
   const linkedKit = await loadLinkedKitView(projectId);
+  const projectUsesScopedKit = Boolean(linkedKit && isProjectScopedDomain(linkedKit.domain));
 
-  if (!opts?.force && existingByDomain) {
+  if (!projectUsesScopedKit && !opts?.force && existingByDomain) {
     const cached = await attachCachedKit(projectId, url, existingByDomain);
     if (cached?.ok) return cached;
   }
 
-  if (!opts?.force && linkedKit?.complete && linkedKit.domain === domain) {
+  if (!projectUsesScopedKit && !opts?.force && linkedKit?.complete && linkedKit.domain === domain) {
     const cached = await attachCachedKit(projectId, url, existingByDomain ?? (await findByDomain(linkedKit.domain)));
     if (cached?.ok) return cached;
   }
@@ -173,7 +174,16 @@ export async function ensureBrandKit(
   } as BrandKitStoredPayload;
 
   let saved: BrandKitRecord;
-  if (existingByDomain) {
+  if (projectUsesScopedKit && linkedKit) {
+    await prisma.brandKit.update({
+      where: { id: linkedKit.id },
+      data: {
+        website: extracted.finalUrl,
+        kit: finalPayload as object,
+      },
+    });
+    saved = (await findByDomain(linkedKit.domain))!;
+  } else if (existingByDomain) {
     await prisma.brandKit.update({
       where: { id: existingByDomain.id },
       data: {

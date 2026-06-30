@@ -107,7 +107,7 @@ export async function buildResumeToolReply(params: {
             ? `User uploaded ${urls.length} product photos.`
             : "User uploaded a product photo."),
         imageUrls: urls,
-        description: summary.marketingBrief ?? summary.description,
+        description: summary.description ?? summary.webResearchNotes,
         userNotes: mergedNotes || undefined,
       });
     }
@@ -164,14 +164,18 @@ export async function routeChatToPausedTask(params: {
   if (!paused) return { mode: "planning" };
 
   const wasImagePause = isPreImageRequestState(paused.agentState);
+
   const hasProductPhotos = Boolean(params.imageIds?.length);
 
-  const toolReply =
-    wasImagePause && hasProductPhotos
+  const hasCardNotes = Boolean(params.productNotes?.trim() || params.contextImageId);
+
+  let toolReply: string;
+  try {
+    toolReply = wasImagePause
       ? await prepareTaskImageSubmit({
           projectId: params.projectId,
           taskId: paused.id,
-          imageIds: params.imageIds!,
+          imageIds: params.imageIds,
           productNotes: params.productNotes,
           contextImageId: params.contextImageId,
           message: params.message,
@@ -184,8 +188,25 @@ export async function routeChatToPausedTask(params: {
           productNotes: params.productNotes,
           contextImageId: params.contextImageId,
         });
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "Could not attach your photos — try again.";
+    return { mode: "error", message };
+  }
 
-  const hasCardNotes = Boolean(params.productNotes?.trim() || params.contextImageId);
+  if (hasProductPhotos) {
+    const verified = await prisma.task.findUnique({
+      where: { id: paused.id },
+      select: { sourceImages: true },
+    });
+    const savedCount = ((verified?.sourceImages as string[] | null) ?? []).length;
+    if (savedCount === 0) {
+      return {
+        mode: "error",
+        message: "Photos could not be attached — please upload again and submit.",
+      };
+    }
+  }
 
   const userMessage = await prisma.message.create({
     data: {
@@ -265,7 +286,8 @@ export async function routeChatToPausedTask(params: {
     });
   }
 
-  void advanceImageCollectionQueue(params.projectId, { force: true }).catch((err) => {
+  const scope = params.conversationId ? { conversationId: params.conversationId } : undefined;
+  void advanceImageCollectionQueue(params.projectId, { force: true, scope }).catch((err) => {
     console.warn("[routeChatToPausedTask] advanceImageCollectionQueue failed:", err);
   });
 

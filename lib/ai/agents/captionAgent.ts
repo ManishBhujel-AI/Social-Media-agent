@@ -2,6 +2,7 @@ import { prisma } from "@/lib/db/prisma";
 import { openRouterChatText } from "../openrouter";
 import { MODELS } from "../models.config";
 import { formatBrandKitForCaptionPrompt, resolveBrandKitForTask } from "@/lib/brandKit/formatForPrompt";
+import { resolvePreferenceContextFromTask } from "@/lib/brandKit/preferences";
 
 export async function runCaptionWithFeedback(
   taskId: string,
@@ -9,7 +10,9 @@ export async function runCaptionWithFeedback(
 ): Promise<string> {
   const task = await prisma.task.findUniqueOrThrow({ where: { id: taskId } });
   const kit = await resolveBrandKitForTask(task);
-  const brandContext = kit ? formatBrandKitForCaptionPrompt(kit) : "";
+  const brandContext = kit
+    ? formatBrandKitForCaptionPrompt(kit, resolvePreferenceContextFromTask(task))
+    : "";
 
   const caption = await openRouterChatText({
     model: MODELS.caption.model,

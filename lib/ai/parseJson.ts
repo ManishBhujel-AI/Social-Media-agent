@@ -1,3 +1,5 @@
+import { extractJsonFromModelText } from "./extractModelJson";
+
 /** Strip markdown ```json fences and trim model output before JSON.parse. */
 export function stripJsonFences(raw: string): string {
   let s = raw.trim();
@@ -7,12 +9,9 @@ export function stripJsonFences(raw: string): string {
 }
 
 export function parseModelJson<T>(raw: string, context?: string): T {
-  const trimmed = stripJsonFences(raw);
-  if (!trimmed) {
-    throw new Error(`Empty JSON content${context ? ` (${context})` : ""}`);
-  }
   try {
-    return JSON.parse(trimmed) as T;
+    const extracted = extractJsonFromModelText(raw, context);
+    return JSON.parse(extracted) as T;
   } catch (err) {
     console.error(
       `JSON parse failed${context ? ` (${context})` : ""}. Raw (first 500 chars):`,

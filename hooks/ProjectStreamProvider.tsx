@@ -43,9 +43,11 @@ const ProjectStreamContext = createContext<ProjectStreamContextValue | null>(nul
 
 export function ProjectStreamProvider({
   projectId,
+  conversationId = null,
   children,
 }: {
   projectId: string;
+  conversationId?: string | null;
   children: ReactNode;
 }) {
   const [agentActivity, setAgentActivity] = useState<string | null>(null);
@@ -57,9 +59,11 @@ export function ProjectStreamProvider({
 
   const clearAgentActivity = useCallback(() => setAgentActivity(null), []);
 
+  const tasksQuery = conversationId ? `?conversation=${conversationId}` : "";
+
   const refreshTasks = useCallback(async (): Promise<TaskWithMeta[]> => {
     try {
-      const res = await fetch(`/api/projects/${projectId}/tasks`);
+      const res = await fetch(`/api/projects/${projectId}/tasks${tasksQuery}`);
       if (!res.ok) return [];
       const data = (await res.json()) as TaskWithMeta[];
       setTasks(data);
@@ -67,7 +71,7 @@ export function ProjectStreamProvider({
     } catch {
       return [];
     }
-  }, [projectId]);
+  }, [projectId, tasksQuery]);
 
   const hydrateProjectTasks = useCallback(
     (initial: TaskWithMeta[]) => {
@@ -81,7 +85,7 @@ export function ProjectStreamProvider({
     setTasks([]);
     setUsePolling(false);
     errors.current = 0;
-  }, [projectId]);
+  }, [projectId, conversationId]);
 
   const subscribeTaskEvents = useCallback((listener: TaskListener) => {
     taskListeners.current.add(listener);
@@ -107,10 +111,17 @@ export function ProjectStreamProvider({
 
   const applyTaskEvent = useCallback(
     (event: TaskStreamEvent) => {
+      if (
+        conversationId &&
+        event.payload.conversationId &&
+        event.payload.conversationId !== conversationId
+      ) {
+        return;
+      }
       setTasks((prev) => mergeTaskStreamEvent(prev, event.type, event.payload));
       emitTaskEvent(event);
     },
-    [emitTaskEvent]
+    [conversationId, emitTaskEvent]
   );
 
   const handleEvent = useCallback(
@@ -156,6 +167,12 @@ export function ProjectStreamProvider({
           }
 
           emitMessage(payload);
+          return;
+        }
+
+        if (data.type === "task.deleted" && Array.isArray((data.payload as { taskIds?: string[] })?.taskIds)) {
+          const removed = new Set((data.payload as { taskIds: string[] }).taskIds);
+          setTasks((prev) => prev.filter((t) => !removed.has(t.id)));
           return;
         }
 

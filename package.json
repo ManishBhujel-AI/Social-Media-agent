@@ -16,6 +16,8 @@
     "test:image": "tsx --env-file-if-exists=.env scripts/test-image-gen.ts",
     "test:json": "tsx scripts/test-json-parse.ts",
     "test:agent-loop": "tsx scripts/test-agent-loop.ts",
+    "test:settings-write-loop": "tsx scripts/test-settings-write-loop.ts",
+    "test:preferences-scoping": "tsx scripts/test-preferences-scoping.ts",
     "test:page-cache": "tsx scripts/test-page-cache.ts",
     "pipeline:once": "tsx --env-file-if-exists=.env scripts/run-pipeline-once.ts"
   },

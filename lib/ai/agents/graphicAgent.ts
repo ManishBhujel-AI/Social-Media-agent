@@ -4,17 +4,8 @@ import { MODELS } from "../models.config";
 import { getImageProvider } from "../imageProvider";
 import { getStorage } from "@/lib/storage";
 import { prisma } from "@/lib/db/prisma";
-import {
-  formatMarketingBriefForPrompt,
-  formatUserProductNotesForPrompt,
-  formatVisualContextForPrompt,
-  requireMarketingCopyContext,
-} from "../productContext";
-import { formatBrandKitForCaptionPrompt, resolveBrandKitForTask } from "@/lib/brandKit/formatForPrompt";
-import { formatReferencesForCaptionPrompt, getReferencesForTask } from "@/lib/content/references";
-import { CAPTION_WRITER_SYSTEM_PROMPT, hashtagGuidanceFromReferences } from "../captionPrompt";
-import { openRouterChatText } from "../openrouter";
-import { generateImagePrompt, generateGraphicCopy } from "./promptRefiner";
+import { generateImagePrompt } from "./promptRefiner";
+import { generatePostContentForTask } from "../postContent";
 import { RetryableError } from "../errors";
 import { buildGraphicReferences } from "../graphicReferences";
 import { withTransientRetry } from "@/lib/db/transientRetry";
@@ -154,7 +145,9 @@ async function makeGraphicForTaskInner(taskId: string): Promise<string> {
 
   let imagePrompt = task.imagePrompt;
   if (!imagePrompt) {
-    await generateGraphicCopy(taskId);
+    if (!task.graphicCopy) {
+      throw new Error("Task has no graphic copy — run writeCaption first");
+    }
     imagePrompt = await generateImagePrompt(taskId);
   }
 
@@ -208,31 +201,6 @@ async function makeGraphicForTaskInner(taskId: string): Promise<string> {
 }
 
 export async function writeCaptionForTask(taskId: string): Promise<string> {
-  const task = await prisma.task.findUniqueOrThrow({ where: { id: taskId } });
-  const product = requireMarketingCopyContext(task);
-  const kit = await resolveBrandKitForTask(task);
-  const brandContext = kit
-    ? formatBrandKitForCaptionPrompt(kit)
-    : JSON.stringify(task.businessSummary ?? task.businessInfo ?? {});
-  const refs = await getReferencesForTask(task.projectId, taskId);
-  const refBlock = formatReferencesForCaptionPrompt(refs);
-  const notesBlock = formatUserProductNotesForPrompt(task.userProductNotes);
-
-  const caption = await openRouterChatText({
-    model: MODELS.caption.model,
-    messages: [
-      {
-        role: "system",
-        content: `${CAPTION_WRITER_SYSTEM_PROMPT}\n\n${hashtagGuidanceFromReferences(refs)}`,
-      },
-      {
-        role: "user",
-        content: `${formatMarketingBriefForPrompt(product)}\n${brandContext}${notesBlock ? `\n\n${notesBlock}` : ""}${refBlock ? `\n\n${refBlock}` : ""}\n\nWrite one Facebook caption.`,
-      },
-    ],
-  });
-
-  const trimmed = caption.trim();
-  await prisma.task.update({ where: { id: taskId }, data: { caption: trimmed } });
-  return trimmed;
+  const { caption } = await generatePostContentForTask(taskId);
+  return caption;
 }

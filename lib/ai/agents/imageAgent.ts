@@ -12,6 +12,7 @@ import {
   resolveBrandKitForTask,
 } from "@/lib/brandKit/formatForPrompt";
 import { generateGraphicCopy } from "./promptRefiner";
+import { resolvePreferenceContextFromTask } from "@/lib/brandKit/preferences";
 
 function capFeedbackRefs(urls?: string[]): string[] {
   return (urls ?? []).slice(0, MAX_FEEDBACK_REFERENCE_IMAGES);
@@ -96,6 +97,7 @@ export async function regenerateImage(params: {
     kit,
     graphicCopy,
     productDescription: productOneLinerFromTask(task),
+    context: resolvePreferenceContextFromTask(task),
   });
 
   const { referenceImageUrls, promptSuffix } = await buildGraphicReferences(task);

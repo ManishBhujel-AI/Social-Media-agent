@@ -11,18 +11,36 @@ export async function resolveSourceImages(
 ): Promise<string[]> {
   if (!sourceImages?.length) return [];
 
-  const needsLookup = sourceImages.some((s) => !looksLikeStorageUrl(s));
-  if (!needsLookup) return sourceImages;
+  const resolved: string[] = [];
+  const idsToLookup: string[] = [];
 
-  const uploaded = await prisma.uploadedImage.findMany({ where: { projectId } });
-  const idToUrl = new Map(uploaded.map((img) => [img.id, img.blobUrl]));
+  for (const entry of sourceImages) {
+    if (looksLikeStorageUrl(entry)) {
+      resolved.push(entry);
+    } else {
+      idsToLookup.push(entry);
+    }
+  }
 
-  return sourceImages
-    .map((entry) => {
-      if (looksLikeStorageUrl(entry)) return entry;
-      return idToUrl.get(entry) ?? null;
-    })
-    .filter((url): url is string => Boolean(url));
+  if (idsToLookup.length) {
+    const uploaded = await prisma.uploadedImage.findMany({
+      where: { projectId, id: { in: idsToLookup } },
+      select: { id: true, blobUrl: true },
+    });
+    const idToUrl = new Map(uploaded.map((img) => [img.id, img.blobUrl]));
+    for (const id of idsToLookup) {
+      const url = idToUrl.get(id);
+      if (url) {
+        resolved.push(url);
+      } else {
+        console.warn(
+          `[resolveSourceImages] UploadedImage not found: id=${id} projectId=${projectId}`
+        );
+      }
+    }
+  }
+
+  return resolved;
 }
 
 /** Resolve a single source image entry to a storage URL. */

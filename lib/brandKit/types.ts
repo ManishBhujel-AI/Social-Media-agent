@@ -2,6 +2,36 @@ export type FieldSource = "site" | "user" | "default";
 
 export type BrandColor = { name: string; hex?: string };
 
+export type ClientPreferenceScope = `client` | `product:${string}` | `topic:${string}`;
+
+export type ClientPreferenceEntry = {
+  id: string;
+  date: string;
+  scope: ClientPreferenceScope;
+  note: string;
+};
+
+export type SecondaryContact = {
+  branch: string;
+  phone: string;
+  address: string;
+};
+
+export type SettingsPatchItem = {
+  /** Slash-separated path, e.g. `clientPreferences`, `productNotes/Zoomlock Max`, `colors/0/hex` */
+  path: string;
+  value: unknown;
+};
+
+export type SettingsChangelogEntry = {
+  id: string;
+  at: string;
+  source: "agent" | "user";
+  summary: string;
+  patches: { path: string; before: unknown; after: unknown }[];
+  revertedAt?: string;
+};
+
 export type BrandKitFieldName =
   | "businessName"
   | "website"
@@ -35,6 +65,14 @@ export type BrandKitData = {
   avoidColors: string[];
   sources: Partial<Record<BrandKitFieldName | "businessSummary", FieldSource>>;
   skipped: Partial<Record<BrandKitFieldName, boolean>>;
+  /** Append-only learned dos/don'ts — scoped to client, product, or topic. */
+  clientPreferences: ClientPreferenceEntry[];
+  /** Per-product/campaign quick notes keyed by product name. */
+  productNotes: Record<string, string>;
+  /** Branch contacts for multi-location captions (caption path only). */
+  secondaryContacts: SecondaryContact[];
+  /** Agent and user settings changes with revert support. */
+  settingsChangelog: SettingsChangelogEntry[];
 };
 
 export type BrandKitCompletenessOpts = {
@@ -186,6 +224,59 @@ export function normalizeBrandKitData(raw: unknown): BrandKitData {
       ? (obj.skipped as Partial<Record<BrandKitFieldName, boolean>>)
       : {};
 
+  const clientPreferences = Array.isArray(obj.clientPreferences)
+    ? obj.clientPreferences
+        .filter((e): e is Record<string, unknown> => e != null && typeof e === "object")
+        .map((e) => ({
+          id: typeof e.id === "string" ? e.id : "",
+          date: typeof e.date === "string" ? e.date : "",
+          scope: (typeof e.scope === "string" ? e.scope : "client") as ClientPreferenceScope,
+          note: typeof e.note === "string" ? e.note : "",
+        }))
+        .filter((e) => e.id && e.note.trim())
+    : [];
+
+  const productNotes: Record<string, string> = {};
+  if (obj.productNotes && typeof obj.productNotes === "object" && !Array.isArray(obj.productNotes)) {
+    for (const [key, val] of Object.entries(obj.productNotes as Record<string, unknown>)) {
+      if (typeof val === "string" && val.trim()) productNotes[key] = val.trim();
+    }
+  }
+
+  const secondaryContacts = Array.isArray(obj.secondaryContacts)
+    ? obj.secondaryContacts
+        .filter((c): c is Record<string, unknown> => c != null && typeof c === "object")
+        .map((c) => ({
+          branch: typeof c.branch === "string" ? c.branch : "",
+          phone: typeof c.phone === "string" ? c.phone : "",
+          address: typeof c.address === "string" ? c.address : "",
+        }))
+        .filter((c) => c.branch || c.phone)
+    : [];
+
+  const settingsChangelog = Array.isArray(obj.settingsChangelog)
+    ? obj.settingsChangelog
+        .filter((e): e is Record<string, unknown> => e != null && typeof e === "object")
+        .map((e) => ({
+          id: typeof e.id === "string" ? e.id : "",
+          at: typeof e.at === "string" ? e.at : "",
+          source: e.source === "agent" ? ("agent" as const) : ("user" as const),
+          summary: typeof e.summary === "string" ? e.summary : "",
+          patches: Array.isArray(e.patches)
+            ? e.patches
+                .filter((p): p is Record<string, unknown> => p != null && typeof p === "object")
+                .map((p) => ({
+                  path: typeof p.path === "string" ? p.path : "",
+                  before: p.before,
+                  after: p.after,
+                }))
+                .filter((p) => p.path)
+            : [],
+          revertedAt: typeof e.revertedAt === "string" ? e.revertedAt : undefined,
+        }))
+        .filter((e) => e.id && e.patches.length > 0)
+    : [];
+
   return {
     businessName: typeof obj.businessName === "string" ? obj.businessName : "",
     website: typeof obj.website === "string" ? obj.website : "",
@@ -203,5 +294,9 @@ export function normalizeBrandKitData(raw: unknown): BrandKitData {
     avoidColors,
     sources,
     skipped,
+    clientPreferences,
+    productNotes,
+    secondaryContacts,
+    settingsChangelog,
   };
 }

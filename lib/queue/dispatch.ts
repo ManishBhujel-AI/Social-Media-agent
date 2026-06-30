@@ -1,9 +1,34 @@
 import { enqueueJob, type JobType } from "./bullmq";
 import { isProjectPipelinePaused } from "./pipelinePauseFlag";
 import { prisma } from "@/lib/db/prisma";
+import { isRetryable } from "@/lib/ai/errors";
+import { isTransientConnectionError } from "@/lib/db/transientRetry";
+import { updateTaskStatus } from "@/lib/tasks/taskEvents";
+import { formatTaskFailureLabel } from "@/lib/tasks/failureLabel";
+import type { TaskStatus } from "@prisma/client";
 
 /** Prevent duplicate inline jobs on the same task (race on image submit + kick-pipeline). */
 const inlineRunningTaskIds = new Set<string>();
+
+const IN_PROGRESS: TaskStatus[] = [
+  "AGENT_RUNNING",
+  "WRITING_CAPTION",
+  "WRITING_PROMPT",
+  "GENERATING_IMAGE",
+];
+
+async function markInlinePipelineFailure(taskId: string, err: unknown) {
+  if (isRetryable(err) || isTransientConnectionError(err)) return;
+  const task = await prisma.task.findUnique({
+    where: { id: taskId },
+    select: { status: true },
+  });
+  if (!task || !IN_PROGRESS.includes(task.status)) return;
+  const msg = err instanceof Error ? err.message : String(err);
+  await updateTaskStatus(taskId, "FAILED", {
+    statusLabel: formatTaskFailureLabel(msg),
+  });
+}
 
 export type DispatchResult = { ok: true } | { ok: false; reason: "paused" | "already_running" };
 
@@ -81,8 +106,11 @@ export async function dispatchPipelineJob(params: {
     const { processJob } = await import("./handlers");
     if (params.taskId) inlineRunningTaskIds.add(params.taskId);
     void processJob(params.type, params.payload)
-      .catch((err) => {
+      .catch(async (err) => {
         console.error(`[pipeline:inline] ${params.type} failed:`, err);
+        if (params.taskId) {
+          await markInlinePipelineFailure(params.taskId, err);
+        }
       })
       .finally(() => {
         if (params.taskId) inlineRunningTaskIds.delete(params.taskId);

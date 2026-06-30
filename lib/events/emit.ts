@@ -6,6 +6,7 @@ export type ProjectEvent = {
   type:
     | "task.created"
     | "task.updated"
+    | "task.deleted"
     | "task.deliverable.updated"
     | "job.failed"
     | "project.updated"

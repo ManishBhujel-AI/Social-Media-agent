@@ -36,16 +36,20 @@ export function buildQuestionForField(field: BrandKitFieldName): {
   const questions: Record<BrandKitFieldName, string> = {
     businessName: "What's your business name?",
     businessType: "What type of business is this? (e.g. coffee shop, plumbing company)",
-    location: "Where is the business located? List all branches or service areas if there are multiple (e.g. Oahu, Kona, statewide Hawaii).",
-    audience: "Who is your target audience?",
-    tone: "How should your brand sound? (e.g. friendly, professional, bold)",
+    location:
+      "Where is the business located? List all branches or service areas if there are multiple.",
+    audience: "Who are these posts mainly for — trade pros, or general customers?",
+    tone: "How should you sound — more polished and formal, or plainspoken and friendly?",
     colors:
-      "What are your brand colors? List primary, secondary, and accent. Hex codes preferred (e.g. #1A2B3C) or color names (e.g. navy blue).",
-    contact: "What contact info should appear on graphics? (e.g. phone number or website)",
+      "I pulled some brand colors from your site — any to add or remove? List primary/secondary/accent with hex if you can.",
+    contact:
+      "What phone number or handle should appear on the graphics, and any preference for how it looks?",
     website: "What's the business website URL?",
-    heritage: "Any heritage or story to highlight? (e.g. family-owned since 1961)",
+    heritage:
+      "Anything about your history worth featuring — founding year, family-owned, milestones?",
     themeWords: "What words capture the brand feel or location vibe? (e.g. tropical, ocean, summer)",
-    avoidColors: "Are there any colors to avoid in your brand graphics?",
+    avoidColors:
+      "Anything you definitely don't want in your posts — colors, words, imagery?",
     contactStyle: "",
     aspectRatio: "",
   };

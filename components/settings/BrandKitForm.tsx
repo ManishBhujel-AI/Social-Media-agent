@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { GLASS_CARD } from "@/lib/design/tokens";
 import type { BrandColor, BrandKitData, BrandKitFieldName, FieldSource } from "@/lib/brandKit/types";
+import { createEmptyBrandKitData } from "@/lib/brandKit/defaults";
 
 type BrandKitResponse = {
   brandKit: {
@@ -49,24 +50,7 @@ function SourceBadge({ source }: { source?: FieldSource }) {
 }
 
 function emptyKit(): BrandKitData {
-  return {
-    businessName: "",
-    website: "",
-    location: "",
-    businessType: "",
-    audience: "",
-    tone: "",
-    heritage: "",
-    themeWords: "",
-    contact: "",
-    contactStyle: "clearly visible, on-brand color",
-    aspectRatio: "1:1",
-    businessSummary: "",
-    colors: [],
-    avoidColors: [],
-    sources: { contactStyle: "default", aspectRatio: "default" },
-    skipped: {},
-  };
+  return createEmptyBrandKitData();
 }
 
 export function BrandKitForm({

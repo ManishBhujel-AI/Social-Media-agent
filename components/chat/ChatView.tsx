@@ -4,10 +4,12 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import Link from "next/link";
 import type { Message, Task } from "@prisma/client";
 import { GLASS_CARD, PAGE_PADDING } from "@/lib/design/tokens";
-import { PostImageRequestCard } from "@/components/chat/PostImageRequestCard";
+import { PostImageRequestCard, type PhotoCardDraft } from "@/components/chat/PostImageRequestCard";
 import { AgentQuestionCard } from "@/components/chat/AgentQuestionCard";
 import { BrandKitQuestionCard } from "@/components/chat/BrandKitQuestionCard";
-import type { BrandKitFieldName } from "@/lib/brandKit/types";
+import { SettingsProposalCard } from "@/components/settings/SettingsProposalCard";
+import { ChatConversationBar } from "@/components/chat/ChatConversationBar";
+import type { BrandKitFieldName, SettingsPatchItem } from "@/lib/brandKit/types";
 import { ChatAgentActivityRow, deriveChatStatus } from "@/components/chat/ChatStatusBar";
 import {
   useProjectStream,
@@ -15,6 +17,7 @@ import {
 } from "@/hooks/useProjectStream";
 import { useProjectTasks } from "@/hooks/useProjectTasks";
 import { mergeTaskStreamEvent } from "@/lib/tasks/taskStream";
+import { conversationQuery } from "@/lib/conversations/conversationQuery";
 import {
   filterDisplayMessages,
   mergeServerMessages,
@@ -31,6 +34,7 @@ import {
   pendingTaskReplyHint,
   shouldShowAgentQuestionCard,
 } from "@/lib/tasks/pendingTask";
+import { taskHasAssignedImage } from "@/lib/tasks/taskPauseState";
 
 type MessageMeta = {
   type?: string;
@@ -42,6 +46,12 @@ type MessageMeta = {
   postTitle?: string;
   productName?: string;
   orderIndex?: number;
+  status?: "pending" | "applied" | "declined";
+  proposal?: {
+    summary: string;
+    patches: SettingsPatchItem[];
+    source?: "agent" | "user";
+  };
 };
 
 function findPendingBrandKitQuestion(messages: Message[]): {
@@ -83,11 +93,13 @@ export function ChatView({
   conversationId,
   initialMessages,
   tasks: initialTasks,
+  conversations = [],
 }: {
   projectId: string;
   conversationId: string;
   initialMessages: Message[];
   tasks: Task[];
+  conversations?: { id: string; createdAt: string; messageCount: number }[];
 }) {
   const [messages, setMessages] = useState(() => filterDisplayMessages(initialMessages));
   const { tasks, setTasks, refreshTasks: refreshProjectTasks } = useProjectTasks(initialTasks);
@@ -98,6 +110,8 @@ export function ChatView({
   const [stopping, setStopping] = useState(false);
   const [pipelinePaused, setPipelinePaused] = useState(false);
   const [pipelineBusy, setPipelineBusy] = useState(false);
+  const [pinnedImageRequestTaskId, setPinnedImageRequestTaskId] = useState<string | null>(null);
+  const [photoCardDrafts, setPhotoCardDrafts] = useState<Record<string, PhotoCardDraft>>({});
 
   type QueuedMessage = { id: string; text: string; imageIds: string[] };
   const MAX_QUEUE_DEPTH = 5;
@@ -108,7 +122,6 @@ export function ChatView({
   const streamingMessageIdRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const conversationRef = useRef(conversationId);
-  const kickedPipelineRef = useRef<Set<string>>(new Set());
   const lastKickAtRef = useRef(0);
   const refreshMessagesTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const completionAnnouncedRef = useRef(false);
@@ -119,7 +132,40 @@ export function ChatView({
   const activeImageRequestTaskId = getActiveImageRequestTaskId(tasks);
   const pendingImageRequestTaskId =
     pendingTask && isPhotoCollectionPause(pendingTask) ? pendingTask.id : null;
-  const visibleImageRequestTaskId = activeImageRequestTaskId ?? pendingImageRequestTaskId;
+  const derivedImageRequestTaskId = activeImageRequestTaskId ?? pendingImageRequestTaskId;
+  const pinnedStillWaiting = Boolean(
+    pinnedImageRequestTaskId &&
+      tasks.some(
+        (t) =>
+          t.id === pinnedImageRequestTaskId &&
+          t.status === "NEEDS_INFO" &&
+          isPhotoCollectionPause(t)
+      )
+  );
+  const visibleImageRequestTaskId =
+    derivedImageRequestTaskId ??
+    (pinnedStillWaiting ? pinnedImageRequestTaskId : null);
+
+  useEffect(() => {
+    if (!derivedImageRequestTaskId) return;
+    setPinnedImageRequestTaskId((prev) => {
+      if (!prev || prev === derivedImageRequestTaskId) return derivedImageRequestTaskId;
+      const draft = photoCardDrafts[prev];
+      const hasDraft = Boolean(
+        draft?.attachedImageIds?.length ||
+          draft?.contextImageId ||
+          draft?.productNotes?.trim()
+      );
+      const prevStillWaiting = tasks.some(
+        (t) =>
+          t.id === prev &&
+          t.status === "NEEDS_INFO" &&
+          isPhotoCollectionPause(t)
+      );
+      if (hasDraft && prevStillWaiting) return prev;
+      return derivedImageRequestTaskId;
+    });
+  }, [derivedImageRequestTaskId, photoCardDrafts, tasks]);
 
   const sortedTasks = [...tasks].sort((a, b) => a.orderIndex - b.orderIndex);
   const hasActivePipeline =
@@ -147,26 +193,15 @@ export function ChatView({
 
   const refreshMessages = useCallback(async () => {
     try {
-      const [msgRes, taskData] = await Promise.all([
+      const [msgRes] = await Promise.all([
         fetch(`/api/conversations/${conversationId}/messages`),
         refreshProjectTasks(),
       ]);
 
-      const pending = getActivePendingTask(taskData);
-      const activeId =
-        getActiveImageRequestTaskId(taskData) ??
-        (pending && isPhotoCollectionPause(pending) ? pending.id : null);
-
       if (msgRes.ok) {
         const data = await msgRes.json();
         setMessages((prev) =>
-          mergeServerMessages(
-            prev,
-            data.messages ?? [],
-            streamingMessageIdRef.current,
-            activeId,
-            activeId
-          )
+          mergeServerMessages(prev, data.messages ?? [], streamingMessageIdRef.current)
         );
       }
     } catch {
@@ -189,7 +224,9 @@ export function ChatView({
 
   const refreshTasks = useCallback(async () => {
     try {
-      const stateRes = await fetch(`/api/projects/${projectId}/pipeline-state`);
+      const stateRes = await fetch(
+        `/api/projects/${projectId}/pipeline-state?conversation=${conversationId}`
+      );
       await refreshProjectTasks();
       if (stateRes.ok) {
         const state = await stateRes.json();
@@ -198,7 +235,7 @@ export function ChatView({
     } catch {
       /* ignore */
     }
-  }, [projectId, refreshProjectTasks]);
+  }, [projectId, conversationId, refreshProjectTasks]);
 
   const onTaskEvent = useCallback(
     (event: { type: "task.created" | "task.updated"; payload: Parameters<typeof mergeTaskStreamEvent>[2] }) => {
@@ -260,30 +297,30 @@ export function ChatView({
     if (conversationRef.current === conversationId) return;
     conversationRef.current = conversationId;
     setMessages(filterDisplayMessages(initialMessages));
-    kickedPipelineRef.current.clear();
     streamingMessageIdRef.current = null;
     completionAnnouncedRef.current = false;
     setMessageQueue([]);
     setQueueError(null);
+    lastKickAtRef.current = 0;
+    setPinnedImageRequestTaskId(null);
+    setPhotoCardDrafts({});
   }, [conversationId, initialMessages]);
 
-  const kickPipelineThrottled = useCallback(
-    async (key: string) => {
-      const now = Date.now();
-      if (kickedPipelineRef.current.has(key)) return;
-      if (now - lastKickAtRef.current < KICK_COOLDOWN_MS) return;
+  const kickPipelineThrottled = useCallback(async () => {
+    const now = Date.now();
+    if (now - lastKickAtRef.current < KICK_COOLDOWN_MS) return;
 
-      kickedPipelineRef.current.add(key);
-      lastKickAtRef.current = now;
-      try {
-        await fetch(`/api/projects/${projectId}/kick-pipeline`, { method: "POST" });
-        await refreshTasks();
-      } catch {
-        kickedPipelineRef.current.delete(key);
-      }
-    },
-    [projectId, refreshTasks]
-  );
+    lastKickAtRef.current = now;
+    try {
+      await fetch(
+        `/api/projects/${projectId}/kick-pipeline?conversation=${conversationId}`,
+        { method: "POST" }
+      );
+      await refreshTasks();
+    } catch {
+      lastKickAtRef.current = 0;
+    }
+  }, [projectId, refreshTasks]);
 
   useEffect(() => {
     const stalledSubmitted = tasks.filter((t) => {
@@ -292,19 +329,19 @@ export function ChatView({
       return urls.length > 0 || Boolean(t.productImageUrl);
     });
     if (stalledSubmitted.length) {
-      const key = `stalled:${stalledSubmitted.map((t) => t.id).sort().join(",")}`;
-      void kickPipelineThrottled(key);
+      void kickPipelineThrottled();
       return;
     }
 
     if (isImageCollectionBlocked(tasks)) return;
 
-    const stuck = tasks.filter((t) => t.status === "NOT_STARTED");
-    if (!stuck.length) return;
+    const needsPhotoCard = tasks.filter(
+      (t) => t.status === "NOT_STARTED" && !taskHasAssignedImage(t)
+    );
+    if (!needsPhotoCard.length) return;
 
-    const key = stuck.map((t) => t.id).sort().join(",");
-    void kickPipelineThrottled(key);
-  }, [tasks, kickPipelineThrottled]);
+    void kickPipelineThrottled();
+  }, [tasks, kickPipelineThrottled, conversationId]);
 
   /** Worker runs in a separate process — poll messages + tasks while posts are actively running. */
   useEffect(() => {
@@ -542,16 +579,39 @@ export function ChatView({
     }
   };
 
-  const onImageCardResponded = useCallback(async (ack?: string) => {
+  const onImageCardResponded = useCallback(async (ack?: string, submittedTaskId?: string) => {
+    if (submittedTaskId) {
+      setPinnedImageRequestTaskId((prev) =>
+        prev === submittedTaskId ? null : prev
+      );
+      setPhotoCardDrafts((prev) => {
+        if (!prev[submittedTaskId]) return prev;
+        const next = { ...prev };
+        delete next[submittedTaskId];
+        return next;
+      });
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === submittedTaskId && t.status === "NEEDS_INFO"
+            ? {
+                ...t,
+                status: "AGENT_RUNNING" as const,
+                statusLabel: "Creating post — photo received…",
+                pendingQuestion: null,
+              }
+            : t
+        )
+      );
+    }
     if (ack?.trim()) {
       setMessages((m) => [
         ...m,
         { id: crypto.randomUUID(), role: "assistant", content: ack.trim() } as Message,
       ]);
     }
-    await refreshTasks();
-    await refreshMessages();
-  }, [refreshMessages, refreshTasks]);
+    void refreshTasks();
+    void refreshMessages();
+  }, [refreshMessages, refreshTasks, setTasks]);
 
   const onQuestionCardResponded = useCallback(
     async (ack?: string, userMessage?: string) => {
@@ -628,8 +688,8 @@ export function ChatView({
 
   const displayMessages = filterDisplayMessages(
     messages,
-    activeImageRequestTaskId,
-    pendingImageRequestTaskId
+    visibleImageRequestTaskId,
+    visibleImageRequestTaskId
   );
 
   const isPlanning = Boolean(stopping || loading || agentActivity);
@@ -673,7 +733,9 @@ export function ChatView({
     sortedTasks.every((t) =>
       ["NEEDS_APPROVAL", "APPROVED", "FAILED"].includes(t.status)
     );
-  const showCompletionMessage = allPostsFinished && readyForApprovalCount > 0;
+  const hasConversationContext = messages.some((m) => m.role === "user");
+  const showCompletionMessage =
+    allPostsFinished && readyForApprovalCount > 0 && hasConversationContext;
 
   useEffect(() => {
     if (!showCompletionMessage || completionAnnouncedRef.current) return;
@@ -726,6 +788,11 @@ export function ChatView({
     <div className={`flex justify-center h-full ${PAGE_PADDING} gap-6`}>
       <div className="flex-1 max-w-[820px] min-w-0 flex flex-col">
         <div className={`${GLASS_CARD} flex-1 flex flex-col min-h-0 overflow-hidden`}>
+          <ChatConversationBar
+            projectId={projectId}
+            conversations={conversations}
+            activeConversationId={conversationId}
+          />
           <div className="flex-1 overflow-auto px-7 py-6 flex flex-col gap-4">
             {displayMessages.length === 0 && !isPlanning && (
               <p className="text-sm text-slate-500 text-center py-8">
@@ -741,6 +808,7 @@ export function ChatView({
               const isImageRequest = meta?.type === "image_request";
               const isAgentQuestion = meta?.type === "agent_question";
               const isBrandKitQuestion = meta?.type === "brand_kit_question";
+              const isSettingsProposal = meta?.type === "settings_proposal";
               const replyImages = meta?.imageIds?.length;
               const cardActive = Boolean(
                 pendingTask &&
@@ -752,20 +820,30 @@ export function ChatView({
                 const postTitle = meta.postTitle ?? linkedTask?.title ?? "Post";
                 const productName = meta.productName ?? linkedTask?.subject ?? "Product";
                 const orderIndex = meta.orderIndex ?? linkedTask?.orderIndex ?? 0;
+                const cardTaskId = meta.taskId;
+                const cardDraft = photoCardDrafts[cardTaskId] ?? {
+                  attachedImageIds: [],
+                  contextImageId: null,
+                  productNotes: "",
+                };
 
                 return (
-                  <div key={m.id} className="flex gap-3 animate-blfade">
+                  <div key={`photo-card-${cardTaskId}`} className="flex gap-3">
                     <div className="w-[30px] h-[30px] rounded-[10px] flex-none flex items-center justify-center text-[13px] font-bold text-white bg-gradient-to-br from-orange-500 to-amber-600">
                       📷
                     </div>
                     <PostImageRequestCard
                       projectId={projectId}
                       conversationId={conversationId}
-                      taskId={meta.taskId}
+                      taskId={cardTaskId}
                       postTitle={postTitle}
                       productName={productName}
                       orderIndex={orderIndex}
                       active={Boolean(cardActive)}
+                      draft={cardDraft}
+                      onDraftChange={(next) =>
+                        setPhotoCardDrafts((prev) => ({ ...prev, [cardTaskId]: next }))
+                      }
                       onResponded={onImageCardResponded}
                     />
                   </div>
@@ -790,6 +868,42 @@ export function ChatView({
                       allowSkip={meta.allowSkip === true}
                       active={active}
                       onResponded={onQuestionCardResponded}
+                    />
+                  </div>
+                );
+              }
+
+              if (isSettingsProposal && meta?.proposal) {
+                if (meta.status === "applied") {
+                  return (
+                    <div key={m.id} className="flex gap-3 animate-blfade">
+                      <div className="w-[30px] h-[30px] rounded-[10px] flex-none flex items-center justify-center text-[13px] font-bold text-white bg-gradient-to-br from-amber-500 to-orange-600">
+                        ✓
+                      </div>
+                      <div className="text-xs text-slate-500 py-2">
+                        Saved to client settings: {meta.proposal.summary}
+                      </div>
+                    </div>
+                  );
+                }
+                if (meta.status === "declined") {
+                  return null;
+                }
+                return (
+                  <div key={m.id} className="flex gap-3 animate-blfade">
+                    <div className="w-[30px] h-[30px] rounded-[10px] flex-none flex items-center justify-center text-[13px] font-bold text-white bg-gradient-to-br from-amber-500 to-orange-600">
+                      ⚙
+                    </div>
+                    <SettingsProposalCard
+                      projectId={projectId}
+                      messageId={m.id}
+                      proposal={{
+                        summary: meta.proposal.summary,
+                        patches: meta.proposal.patches,
+                        source: meta.proposal.source,
+                      }}
+                      onApplied={() => scheduleRefreshMessages(300)}
+                      onDeclined={() => scheduleRefreshMessages(300)}
                     />
                   </div>
                 );
@@ -882,7 +996,7 @@ export function ChatView({
             {sortedTasks.length > 0 && pipelineActive && (
               <div className="animate-blfade flex flex-wrap items-center gap-2">
                 <Link
-                  href={`/project/${projectId}/board`}
+                  href={`/project/${projectId}/board${conversationQuery(conversationId)}`}
                   className="inline-flex items-center gap-2.5 px-4 py-2.5 rounded-xl text-[13px] font-semibold text-green-800 bg-green-500/12 border border-green-500/25 hover:bg-green-500/18 transition-colors"
                 >
                   {!pipelinePaused && activeInProgressCount > 0 ? (
@@ -920,14 +1034,14 @@ export function ChatView({
             {pipelinePaused && (
               <div className="animate-blfade px-4 py-2.5 rounded-xl text-[12px] text-amber-900 bg-amber-500/12 border border-amber-500/25">
                 Work is stopped. Tap <span className="font-semibold">Resume work</span> to continue, or
-                use <span className="font-semibold">New brief</span> in the sidebar to start fresh.
+                use <span className="font-semibold">New workspace</span> in the sidebar to start fresh.
               </div>
             )}
 
             {showCompletionMessage && (
               <div className="animate-blfade flex flex-wrap items-center gap-2">
                 <Link
-                  href={`/project/${projectId}/approve`}
+                  href={`/project/${projectId}/approve${conversationQuery(conversationId)}`}
                   className="inline-flex items-center gap-2.5 px-4 py-2.5 rounded-xl text-[13px] font-semibold text-green-800 bg-green-500/12 border border-green-500/25 hover:bg-green-500/18 transition-colors"
                 >
                   Review {readyForApprovalCount} post{readyForApprovalCount === 1 ? "" : "s"} in Approvals →

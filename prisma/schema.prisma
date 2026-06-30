@@ -27,6 +27,8 @@ model Project {
   logoUrl         String?
   visionMatches   Json?
   contentReferences Json?
+  /** All approved past captions for this client — raw paste from settings. */
+  captionCorpus   String?        @db.Text
   /** When true, run Perplexity web research for every post (not only when context is thin). */
   alwaysWebResearch Boolean        @default(false)
   brandKitId      String?
@@ -43,6 +45,7 @@ model Conversation {
   projectId String
   project   Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
   messages  Message[]
+  tasks     Task[]
   createdAt DateTime  @default(now())
 }
 
@@ -74,6 +77,8 @@ model Task {
   id                  String           @id @default(cuid())
   projectId           String
   project             Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  conversationId      String?
+  conversation        Conversation?    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   title               String
   subject             String
   productInfo         Json?

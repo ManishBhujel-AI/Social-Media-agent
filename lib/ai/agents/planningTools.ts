@@ -12,7 +12,14 @@ import { labelForAgentActivity } from "@/lib/chat/agentActivityLabels";
 import { emitTaskCreated } from "@/lib/tasks/taskEvents";
 import { saveContentReferenceFromTool } from "@/lib/content/ingestUserReference";
 import type { ContentReferenceKind } from "@/lib/content/references";
-import type { Task } from "@prisma/client";
+import type { Task, TaskStatus } from "@prisma/client";
+import {
+  buildPreferenceAppendPatch,
+  buildProductNotePatch,
+  parsePreferenceScope,
+  parseProposalPatches,
+  postSettingsProposal,
+} from "@/lib/brandKit/settingsProposals";
 
 export type PlanningContext = {
   projectId: string;
@@ -27,6 +34,38 @@ type CreatePostInput = {
   businessInfo?: object;
   orderIndex: number;
 };
+
+/** Tasks that still represent an in-flight or recoverable post — block duplicate createTasks. */
+const ACTIVE_TASK_STATUSES: TaskStatus[] = [
+  "NOT_STARTED",
+  "NEEDS_INFO",
+  "AGENT_RUNNING",
+  "WRITING_CAPTION",
+  "WRITING_PROMPT",
+  "GENERATING_IMAGE",
+  "NEEDS_APPROVAL",
+  "FAILED",
+];
+
+function normalizeSubject(subject: string): string {
+  return subject.trim().toLowerCase();
+}
+
+async function findActiveTasksBySubject(
+  projectId: string,
+  conversationId: string
+): Promise<Map<string, Task>> {
+  const tasks = await prisma.task.findMany({
+    where: { projectId, conversationId, status: { in: ACTIVE_TASK_STATUSES } },
+    orderBy: { createdAt: "asc" },
+  });
+  const bySubject = new Map<string, Task>();
+  for (const t of tasks) {
+    const key = normalizeSubject(t.subject);
+    if (!bySubject.has(key)) bySubject.set(key, t);
+  }
+  return bySubject;
+}
 
 function dedupePosts(posts: CreatePostInput[]): CreatePostInput[] {
   const seen = new Set<string>();
@@ -122,6 +161,121 @@ export function createPlanningToolHandlers(ctx: PlanningContext) {
       });
     },
 
+    proposeSettingsChange: async (args: Record<string, unknown>) => {
+      const summary = typeof args.summary === "string" ? args.summary : "";
+      const patches = parseProposalPatches(args.patches);
+      if (!patches) {
+        return JSON.stringify({ status: "error", message: "Invalid patches array." });
+      }
+
+      await emitAgentActivity(ctx.projectId, {
+        label: "Proposing settings change…",
+        toolName: "proposeSettingsChange",
+      });
+
+      const result = await postSettingsProposal({
+        projectId: ctx.projectId,
+        conversationId: ctx.conversationId,
+        summary,
+        patches,
+        source: "agent",
+      });
+
+      if (!result.ok) {
+        return JSON.stringify({ status: "error", message: result.error });
+      }
+
+      return JSON.stringify({
+        status: "proposed",
+        messageId: result.messageId,
+        message:
+          "Confirm card shown to the user. Do not repeat the save question in plain text — wait for them to confirm or dismiss.",
+      });
+    },
+
+    proposePreferenceEntry: async (args: Record<string, unknown>) => {
+      const scope = parsePreferenceScope(args.scope);
+      const note = typeof args.note === "string" ? args.note : "";
+      const summary =
+        typeof args.summary === "string" && args.summary.trim()
+          ? args.summary.trim()
+          : `Save preference: ${note.slice(0, 120)}`;
+
+      if (!scope) {
+        return JSON.stringify({
+          status: "error",
+          message: "scope must be client, product:NAME, or topic:NAME",
+        });
+      }
+
+      const patches = await buildPreferenceAppendPatch(ctx.projectId, { scope, note });
+      if ("error" in patches) {
+        return JSON.stringify({ status: "error", message: patches.error });
+      }
+
+      await emitAgentActivity(ctx.projectId, {
+        label: "Proposing preference…",
+        toolName: "proposePreferenceEntry",
+      });
+
+      const result = await postSettingsProposal({
+        projectId: ctx.projectId,
+        conversationId: ctx.conversationId,
+        summary,
+        patches,
+        source: "agent",
+      });
+
+      if (!result.ok) {
+        return JSON.stringify({ status: "error", message: result.error });
+      }
+
+      return JSON.stringify({
+        status: "proposed",
+        messageId: result.messageId,
+        message:
+          "Confirm card shown to the user. Do not repeat the save question in plain text — wait for them to confirm or dismiss.",
+      });
+    },
+
+    proposeProductNote: async (args: Record<string, unknown>) => {
+      const product = typeof args.product === "string" ? args.product : "";
+      const note = typeof args.note === "string" ? args.note : "";
+      const summary =
+        typeof args.summary === "string" && args.summary.trim()
+          ? args.summary.trim()
+          : `Save product note for ${product}`;
+
+      const patches = await buildProductNotePatch(ctx.projectId, product, note);
+      if ("error" in patches) {
+        return JSON.stringify({ status: "error", message: patches.error });
+      }
+
+      await emitAgentActivity(ctx.projectId, {
+        label: "Proposing product note…",
+        toolName: "proposeProductNote",
+      });
+
+      const result = await postSettingsProposal({
+        projectId: ctx.projectId,
+        conversationId: ctx.conversationId,
+        summary,
+        patches,
+        source: "agent",
+      });
+
+      if (!result.ok) {
+        return JSON.stringify({ status: "error", message: result.error });
+      }
+
+      return JSON.stringify({
+        status: "proposed",
+        messageId: result.messageId,
+        message:
+          "Confirm card shown to the user. Do not repeat the save question in plain text — wait for them to confirm or dismiss.",
+      });
+    },
+
     createTasks: async (args: Record<string, unknown>) => {
       const rawPosts = args.posts as CreatePostInput[];
       const posts = dedupePosts(Array.isArray(rawPosts) ? rawPosts : []);
@@ -150,14 +304,45 @@ export function createPlanningToolHandlers(ctx: PlanningContext) {
         const businessSummary = (project.businessSummary as object) ?? {};
         const businessInfo = (project.businessInfo as object) ?? {};
 
-        const resolvedPosts = posts.map((p) => ({
+        const existingBySubject = await findActiveTasksBySubject(ctx.projectId, ctx.conversationId);
+        const alreadyMatched: Task[] = [];
+        const toCreate: CreatePostInput[] = [];
+
+        for (const p of posts) {
+          const key = normalizeSubject(p.subject || p.title);
+          const existing = existingBySubject.get(key);
+          if (existing) {
+            alreadyMatched.push(existing);
+          } else {
+            toCreate.push(p);
+          }
+        }
+
+        if (!toCreate.length && alreadyMatched.length > 0) {
+          const sorted = [...alreadyMatched].sort((a, b) => a.orderIndex - b.orderIndex);
+          return JSON.stringify({
+            status: "already_created",
+            count: sorted.length,
+            taskIds: sorted.map((t) => t.id),
+            logoUrl: project.logoUrl,
+            message:
+              "Posts already exist for this batch. Photo cards are already in chat — do not call createTasks again. Reply with one short sentence only; do not repeat photo-card instructions.",
+          });
+        }
+
+        const maxOrder = await prisma.task.aggregate({
+          where: { projectId: ctx.projectId },
+          _max: { orderIndex: true },
+        });
+        let nextOrderIndex = (maxOrder._max.orderIndex ?? -1) + 1;
+
+        const resolvedPosts = toCreate.map((p) => ({
           ...p,
           productSummary: undefined as ProductSummary | undefined,
         }));
 
         const created: Task[] = [];
-        for (let index = 0; index < resolvedPosts.length; index++) {
-          const p = resolvedPosts[index];
+        for (const p of resolvedPosts) {
           const productName = p.subject || p.title;
           const productInfo = (p.productInfo as { name?: string } | undefined)?.name
             ? p.productInfo
@@ -166,6 +351,7 @@ export function createPlanningToolHandlers(ctx: PlanningContext) {
           const task = await prisma.task.create({
             data: {
               projectId: ctx.projectId,
+              conversationId: ctx.conversationId,
               title: p.title,
               subject: p.subject || productName,
               productInfo: productInfo as object,
@@ -174,7 +360,7 @@ export function createPlanningToolHandlers(ctx: PlanningContext) {
               productSummary: (p.productSummary ?? undefined) as object | undefined,
               logoUrl: project.logoUrl ?? null,
               sourceImages: [] as object,
-              orderIndex: index,
+              orderIndex: nextOrderIndex++,
               status: "NOT_STARTED",
             },
           });
@@ -182,13 +368,27 @@ export function createPlanningToolHandlers(ctx: PlanningContext) {
           await emitTaskCreated(task);
         }
 
-        await startPipelineForTasks(created.map((t) => t.id));
+        if (created.length > 0) {
+          await startPipelineForTasks(created.map((t) => t.id));
+        }
+
+        const allTaskIds = [
+          ...alreadyMatched.map((t) => t.id),
+          ...created.map((t) => t.id),
+        ];
 
         return JSON.stringify({
-          status: "created",
-          count: created.length,
-          taskIds: created.map((t) => t.id),
+          status: created.length === posts.length ? "created" : "partially_created",
+          count: allTaskIds.length,
+          taskIds: allTaskIds,
+          createdCount: created.length,
           logoUrl: project.logoUrl,
+          ...(created.length < posts.length
+            ? {
+                message:
+                  "Some posts already existed — only missing posts were created. Do not call createTasks again for the same products.",
+              }
+            : {}),
         });
       } catch (err) {
         console.error("createTasks failed:", err);

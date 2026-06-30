@@ -1,5 +1,10 @@
 export type MarketingSource = "site" | "vision" | "user" | "search" | "synthesized" | "planning";
 
+export type ResearchCitation = {
+  url: string;
+  title?: string;
+};
+
 export type ProductSummary = {
   name: string;
   description: string;
@@ -10,22 +15,57 @@ export type ProductSummary = {
   descriptionSource?: MarketingSource;
   /** 1–2 lines from vision — graphic/grounding only, never for captions */
   visualContext?: string;
-  /** Benefit-focused copy input for caption and graphic agents */
+  /** Legacy synthesized brief — caption path prefers webResearchNotes or description */
   marketingBrief?: string;
   marketingSource?: MarketingSource;
   /** Raw Perplexity / Sonar notes when marketingSource is search */
   webResearchNotes?: string;
+  /** Source URLs returned by Perplexity Sonar via OpenRouter annotations. */
+  webResearchCitations?: ResearchCitation[];
   researchQuery?: string;
+  /** True when Sonar was called this enrichment pass (even if brief came from user/local). */
+  perplexityUsed?: boolean;
 };
 
+export const MIN_MARKETING_BRIEF_LENGTH = 40;
 export const MIN_PRODUCT_DESCRIPTION_LENGTH = 24;
-const MIN_MARKETING_BRIEF_LENGTH = 40;
+/** Raw Perplexity notes at least this long (with product/benefit signals) count as sufficient research. */
+export const MIN_PRODUCT_RESEARCH_NOTES_CHARS = 200;
 
 const BENEFIT_SIGNALS =
-  /\b(benefit|help|solve|customer|client|contractor|rent|rental|service|for\s+\w+\s+who|ideal\s+for|perfect\s+for)\b/i;
+  /\b(benefit|help|solve|customer|client|contractor|technician|for\s+\w+\s+who|ideal\s+for|perfect\s+for|eliminates|reduces|faster|saves|save|reliable|pain|leak|callback|margin|stock|local|install|connection|fitting)\b/i;
+
+const STOP_WORDS = new Set(["max", "service", "product", "system", "line"]);
+
+export function productNameTokens(productName: string): string[] {
+  return productName
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length > 2 && !STOP_WORDS.has(t));
+}
+
+export function hasUsableWebResearch(notes: string | undefined | null): boolean {
+  return (notes?.trim().length ?? 0) >= MIN_PRODUCT_RESEARCH_NOTES_CHARS;
+}
+
+export function hasSubstantialProductResearch(
+  notes: string | undefined | null,
+  productName: string
+): boolean {
+  if (!hasUsableWebResearch(notes)) return false;
+  const text = notes!.trim();
+  const lower = text.toLowerCase();
+  const tokens = productNameTokens(productName);
+  const mentionsProduct = tokens.length === 0 || tokens.some((t) => lower.includes(t));
+  return mentionsProduct && BENEFIT_SIGNALS.test(text);
+}
 
 export function descriptionQuestion(productName: string): string {
-  return `Tell me briefly what ${productName} is so I describe it correctly.`;
+  return `I couldn't find enough product info for ${productName} from web research or your saved content. In a sentence or two, what is it and who is it for for your customers?`;
+}
+
+export function isProductDescriptionQuestion(question: string | null | undefined): boolean {
+  return Boolean(question?.includes("couldn't find enough product info"));
 }
 
 export function isReliableProductDescription(
@@ -46,8 +86,6 @@ export function isReliableMarketingBrief(brief?: string | null): boolean {
   if (!brief?.trim()) return false;
   return brief.trim().length >= MIN_MARKETING_BRIEF_LENGTH;
 }
-
-/** Stricter than length-only — blocks generic or name-only briefs before captions run. */
 export function passesMarketingBriefQualityGate(
   productName: string,
   brief?: string | null
@@ -64,10 +102,22 @@ export function passesMarketingBriefQualityGate(
   return true;
 }
 
-/** Vision-only descriptions must not satisfy the marketing gate. */
+/** Brief must be about this product — not a generic business-wide intro. */
+export function isProductFocusedBrief(productName: string, brief?: string | null): boolean {
+  if (!passesMarketingBriefQualityGate(productName, brief)) return false;
+  const b = brief!.toLowerCase();
+  const tokens = productNameTokens(productName);
+  if (!tokens.length) return true;
+  return tokens.some((t) => b.includes(t));
+}
+
 export function hasMarketingReadySummary(summary: ProductSummary | null): boolean {
   if (!summary) return false;
-  if (passesMarketingBriefQualityGate(summary.name, summary.marketingBrief)) return true;
+  if (hasUsableWebResearch(summary.webResearchNotes)) return true;
+  if (summary.marketingSource === "user" && isReliableProductDescription(summary.name, summary.description)) {
+    return true;
+  }
+  if (isProductFocusedBrief(summary.name, summary.marketingBrief)) return true;
   if (summary.descriptionSource === "vision") return false;
   return (
     isReliableProductDescription(summary.name, summary.description) &&
@@ -82,7 +132,7 @@ export function getStoredProductSummary(task: {
   title: string;
 }): ProductSummary | null {
   const summary = task.productSummary as ProductSummary | null;
-  if (summary?.description || summary?.marketingBrief) return summary;
+  if (summary?.description || summary?.marketingBrief || summary?.webResearchNotes) return summary;
 
   const info = task.productInfo as { name?: string; description?: string } | null;
   if (info?.description) {
@@ -129,14 +179,35 @@ export function getProductCopyContext(task: {
   };
 }
 
-export function getMarketingBriefText(summary: ProductSummary | null): string | null {
+/** Short preview for agent tool results — not the full research blob passed to writeCaption. */
+export function previewProductInfoForAgent(summary: ProductSummary): string {
+  const notes = summary.webResearchNotes?.trim();
+  if (notes && hasUsableWebResearch(notes)) {
+    return notes.length > 400 ? `${notes.slice(0, 400)}…` : notes;
+  }
+  const desc = summary.description?.trim();
+  if (desc && summary.descriptionSource !== "vision") {
+    return desc.length > 400 ? `${desc.slice(0, 400)}…` : desc;
+  }
+  return "";
+}
+
+export function getProductInfoForCaption(summary: ProductSummary | null): string | null {
   if (!summary) return null;
-  if (summary.marketingBrief?.trim()) return summary.marketingBrief.trim();
-  if (summary.descriptionSource === "vision") return null;
-  if (isReliableProductDescription(summary.name, summary.description)) {
+  const notes = summary.webResearchNotes?.trim();
+  if (notes && hasUsableWebResearch(notes)) return notes;
+  if (summary.marketingSource === "user" && summary.description?.trim()) {
     return summary.description.trim();
   }
+  if (summary.descriptionSource !== "vision" && isReliableProductDescription(summary.name, summary.description)) {
+    return summary.description.trim();
+  }
+  if (summary.marketingBrief?.trim()) return summary.marketingBrief.trim();
   return null;
+}
+
+export function getMarketingBriefText(summary: ProductSummary | null): string | null {
+  return getProductInfoForCaption(summary);
 }
 
 export function getMarketingCopyContext(task: {
@@ -170,12 +241,43 @@ Product description (factual):
 ${ctx.description}`;
 }
 
+export function formatProductInfoForPrompt(ctx: {
+  name: string;
+  summary: ProductSummary | null;
+}): string {
+  const info = getProductInfoForCaption(ctx.summary);
+  if (!info) {
+    throw new MissingMarketingBriefError(ctx.name);
+  }
+
+  const fromPerplexity =
+    ctx.summary?.marketingSource === "search" &&
+    hasUsableWebResearch(ctx.summary.webResearchNotes);
+
+  if (fromPerplexity) {
+    return `POST TOPIC — write this post about this product/service only:
+Product/service: ${ctx.name}
+
+Product info from Perplexity research (use these facts — do not invent beyond this):
+${info}`;
+  }
+
+  return `POST TOPIC — write this post about this product/service only:
+Product/service: ${ctx.name}
+
+Product info:
+${info}`;
+}
+
+/** @deprecated Use formatProductInfoForPrompt */
 export function formatMarketingBriefForPrompt(ctx: {
   name: string;
   marketingBrief: string;
 }): string {
-  return `Product/service: ${ctx.name}
-Marketing brief (use for benefit-led copy — do NOT describe the product photo):
+  return `POST TOPIC — write this post about this product/service only:
+Product/service: ${ctx.name}
+
+Product info:
 ${ctx.marketingBrief}`;
 }
 
@@ -226,16 +328,18 @@ export function requireMarketingCopyContext(task: {
   productSummary: unknown;
 }): { name: string; marketingBrief: string; summary: ProductSummary | null } {
   const ctx = getMarketingCopyContext(task);
-  if (!ctx.hasReliableMarketingBrief || !ctx.marketingBrief) {
+  const productInfo = getProductInfoForCaption(ctx.summary);
+  if (!ctx.hasReliableMarketingBrief || !productInfo) {
     throw new MissingMarketingBriefError(ctx.name);
   }
-  return { name: ctx.name, marketingBrief: ctx.marketingBrief, summary: ctx.summary };
+  return { name: ctx.name, marketingBrief: productInfo, summary: ctx.summary };
 }
 
 export type ProductResearchInfo = {
   title: string;
   source: MarketingSource | "none";
   query?: string;
+  citations?: ResearchCitation[];
   notes?: string;
   brief?: string;
   detail?: string;
@@ -245,7 +349,7 @@ const MARKETING_SOURCE_LABELS: Record<MarketingSource, string> = {
   search: "Perplexity Sonar",
   site: "Client website",
   user: "Your reply",
-  planning: "Brief / planning",
+  planning: "Saved client content",
   synthesized: "Site + business context",
   vision: "Photo vision only",
 };
@@ -256,14 +360,36 @@ export function getProductResearchInfo(productSummary: unknown): ProductResearch
 
   const notes = summary.webResearchNotes?.trim();
   const query = summary.researchQuery?.trim();
+  const citations = summary.webResearchCitations?.length
+    ? summary.webResearchCitations
+    : undefined;
   const brief = summary.marketingBrief?.trim();
   const source = summary.marketingSource;
+  const perplexityRan = Boolean(notes || citations?.length || summary.perplexityUsed);
+
+  if (perplexityRan) {
+    const briefSource = source && source !== "search" ? MARKETING_SOURCE_LABELS[source] : null;
+    return {
+      title: "Perplexity research",
+      source: "search",
+      query,
+      citations,
+      notes,
+      brief,
+      detail: briefSource
+        ? `Perplexity ran for research; product info from ${briefSource}.`
+        : notes
+          ? undefined
+          : "Perplexity ran but returned no usable notes.",
+    };
+  }
 
   if (source === "search") {
     return {
       title: "Perplexity research",
       source: "search",
       query,
+      citations,
       notes,
       brief,
       detail: notes

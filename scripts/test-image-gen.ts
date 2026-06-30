@@ -3,7 +3,7 @@
  * Mandatory OpenRouter image smoke test.
  * (a) Generate from text prompt
  * (b) Edit with locked instruction — verify fidelity
- * (c) Multi-reference — prove 3+ image refs; set MAX_IMAGE_REFS (4, 2, or 1)
+ * (c) Multi-reference — prove 3+ image refs; set MAX_IMAGE_REFS (10, 2, or 1)
  */
 import fs from "fs/promises";
 import path from "path";
@@ -17,8 +17,8 @@ const CONFIG_PATH = path.join(process.cwd(), "lib/ai/imageRefs.config.ts");
 async function writeMaxImageRefsConfig(maxRefs: number) {
   const body = [
     "/**",
-    " * Max reference images gemini-3.1-flash-image accepts in one request.",
-    " * Updated by npm run test:image part (c). Default: 4 (product + extras + logo headroom).",
+    " * Max reference images the image model accepts in one request.",
+    " * Updated by npm run test:image part (c). Default: 10 (product + extras + logo headroom).",
     " */",
     `export const MAX_IMAGE_REFS = ${maxRefs};`,
     "",
@@ -186,8 +186,8 @@ async function main() {
   console.log("Triple-ref check:", tripleCheck);
 
   if (tripleCheck.pass) {
-    await writeMaxImageRefsConfig(4);
-    console.log("\nPASS (c): Triple reference supported — MAX_IMAGE_REFS = 4");
+    await writeMaxImageRefsConfig(10);
+    console.log("\nPASS (c): Triple reference supported — MAX_IMAGE_REFS = 10");
     console.log("\n=== Smoke test PASSED ===\n");
     return;
   }

@@ -1,9 +1,58 @@
 import { prisma } from "@/lib/db/prisma";
+import { collectConversationTaskIds } from "@/lib/conversations/conversationTasks";
 import { dispatchPipelineJob, hasActivePipelineJob, isTaskPipelineJobActive, shouldUseInlinePipeline } from "./dispatch";
 import { isImageCollectionBlocked } from "@/lib/tasks/pendingTask";
 import { isUserPausedTask } from "@/lib/tasks/taskPauseState";
 import { taskHasAssignedImage } from "@/lib/ai/agents/postImageRequest";
+import { healDeliverableStuckTasks, promoteTaskIfDeliverableReady } from "@/lib/tasks/deliverable";
+import { healDescriptionPauseWithReadyResearch } from "@/lib/ai/agents/postCheckpoint";
 import type { TaskStatus } from "@prisma/client";
+
+export type PipelineScope = {
+  conversationId?: string;
+};
+
+async function resolveScopedTaskIds(
+  projectId: string,
+  scope?: PipelineScope
+): Promise<string[] | undefined> {
+  if (!scope?.conversationId) return undefined;
+  const ids = await collectConversationTaskIds(scope.conversationId);
+  return ids.length ? ids : [];
+}
+
+function taskIdFilter(taskIds: string[] | undefined) {
+  return taskIds?.length ? { id: { in: taskIds } } : {};
+}
+
+function advanceCooldownKey(projectId: string, scope?: PipelineScope): string {
+  return scope?.conversationId ? `${projectId}:${scope.conversationId}` : projectId;
+}
+
+function normalizeSubject(subject: string): string {
+  return subject.trim().toLowerCase();
+}
+
+/** Next NOT_STARTED post that still needs a photo card. */
+async function findNextImageCollectionTask(projectId: string, taskIds?: string[]) {
+  if (taskIds && !taskIds.length) return null;
+
+  const candidates = await prisma.task.findMany({
+    where: { projectId, status: "NOT_STARTED", ...taskIdFilter(taskIds) },
+    orderBy: [{ orderIndex: "asc" }, { createdAt: "asc" }],
+  });
+
+  // Dedupe only within the waiting queue — never treat finished posts (approval, etc.) as blocking.
+  const seenSubjects = new Set<string>();
+  for (const t of candidates) {
+    if (taskHasAssignedImage(t)) continue;
+    const key = normalizeSubject(t.subject);
+    if (seenSubjects.has(key)) continue;
+    seenSubjects.add(key);
+    return t;
+  }
+  return null;
+}
 
 const IN_PROGRESS: TaskStatus[] = [
   "AGENT_RUNNING",
@@ -50,9 +99,15 @@ function isTaskInProgress(status: TaskStatus): boolean {
   return IN_PROGRESS.includes(status);
 }
 
-export async function isProjectPipelineBlocked(projectId: string): Promise<boolean> {
+export async function isProjectPipelineBlocked(
+  projectId: string,
+  scope?: PipelineScope
+): Promise<boolean> {
+  const taskIds = await resolveScopedTaskIds(projectId, scope);
+  if (taskIds && !taskIds.length) return false;
+
   const tasks = await prisma.task.findMany({
-    where: { projectId },
+    where: { projectId, ...taskIdFilter(taskIds) },
     select: { status: true, agentState: true, pendingQuestion: true, statusLabel: true },
   });
   return isImageCollectionBlocked(tasks);
@@ -77,15 +132,18 @@ export async function filterNotStartedTaskIds(taskIds: string[]): Promise<string
 }
 
 /** Show the next post's image card (one at a time). */
-export async function promptNextImageCollectionTask(projectId: string): Promise<boolean> {
-  if (await isProjectPipelineBlocked(projectId)) {
+export async function promptNextImageCollectionTask(
+  projectId: string,
+  scope?: PipelineScope
+): Promise<boolean> {
+  const taskIds = await resolveScopedTaskIds(projectId, scope);
+  if (taskIds && !taskIds.length) return false;
+
+  if (await isProjectPipelineBlocked(projectId, scope)) {
     return false;
   }
 
-  const next = await prisma.task.findFirst({
-    where: { projectId, status: "NOT_STARTED" },
-    orderBy: { orderIndex: "asc" },
-  });
+  const next = await findNextImageCollectionTask(projectId, taskIds);
   if (!next) return false;
 
   const payload = { taskId: next.id, remainingTaskIds: [] as string[] };
@@ -106,14 +164,23 @@ export async function promptNextImageCollectionTask(projectId: string): Promise<
 }
 
 /** Recover posts that were submitted but reset to NOT_STARTED by a race bug. */
-export async function resumeSubmittedStalledTasks(projectId: string): Promise<number> {
+export async function resumeSubmittedStalledTasks(
+  projectId: string,
+  scope?: PipelineScope
+): Promise<number> {
+  const taskIds = await resolveScopedTaskIds(projectId, scope);
+  if (taskIds && !taskIds.length) return 0;
+
   const candidates = await prisma.task.findMany({
-    where: { projectId, status: "NOT_STARTED" },
+    where: { projectId, status: "NOT_STARTED", ...taskIdFilter(taskIds) },
     orderBy: { orderIndex: "asc" },
   });
 
   let resumed = 0;
+  const resumedSubjects = new Set<string>();
   for (const task of candidates) {
+    const subjectKey = normalizeSubject(task.subject);
+    if (resumedSubjects.has(subjectKey)) continue;
     if (!taskHasAssignedImage(task)) continue;
     if (await hasActivePipelineJob(task.id)) continue;
     if (await hasRecentPipelineJob(task.id)) continue;
@@ -124,7 +191,10 @@ export async function resumeSubmittedStalledTasks(projectId: string): Promise<nu
       projectId,
       payload: { taskId: task.id, remainingTaskIds: [], skipImageRequest: true },
     });
-    if (dispatch.ok) resumed += 1;
+    if (dispatch.ok) {
+      resumed += 1;
+      resumedSubjects.add(subjectKey);
+    }
   }
   return resumed;
 }
@@ -137,15 +207,25 @@ function hasResumableAgentCheckpoint(agentState: unknown): boolean {
 }
 
 /** Recover in-progress posts whose worker never started (e.g. Stop was pressed, then user answered a card). */
-export async function resumeStalledInProgressTasks(projectId: string): Promise<number> {
+export async function resumeStalledInProgressTasks(
+  projectId: string,
+  scope?: PipelineScope
+): Promise<number> {
+  const taskIds = await resolveScopedTaskIds(projectId, scope);
+  if (taskIds && !taskIds.length) return 0;
+
   const candidates = await prisma.task.findMany({
-    where: { projectId, status: { in: IN_PROGRESS } },
+    where: { projectId, status: { in: IN_PROGRESS }, ...taskIdFilter(taskIds) },
     orderBy: { orderIndex: "asc" },
   });
 
   const now = Date.now();
   let resumed = 0;
   for (const task of candidates) {
+    if (await promoteTaskIfDeliverableReady(task.id)) {
+      resumed += 1;
+      continue;
+    }
     if (isTaskPipelineJobActive(task.id)) continue;
     if (await hasActivePipelineJob(task.id)) continue;
     if (await hasRecentPipelineJob(task.id)) continue;
@@ -173,29 +253,41 @@ export async function resumeStalledInProgressTasks(projectId: string): Promise<n
 }
 
 /** Recover a stalled pipeline at the very start (no cards shown yet). */
-export async function bootstrapImageCollectionIfStalled(projectId: string): Promise<boolean> {
-  await advanceImageCollectionQueue(projectId);
+export async function bootstrapImageCollectionIfStalled(
+  projectId: string,
+  scope?: PipelineScope
+): Promise<boolean> {
+  await advanceImageCollectionQueue(projectId, { force: true, scope });
   return true;
 }
 
 /** Resume submitted posts and show the next photo card when the queue is not blocked. */
 export async function advanceImageCollectionQueue(
   projectId: string,
-  opts?: { force?: boolean }
+  opts?: { force?: boolean; scope?: PipelineScope }
 ): Promise<boolean> {
+  const scope = opts?.scope;
   const now = Date.now();
-  const lastAdvance = lastAdvanceAtByProject.get(projectId) ?? 0;
+  const cooldownKey = advanceCooldownKey(projectId, scope);
+  const lastAdvance = lastAdvanceAtByProject.get(cooldownKey) ?? 0;
   if (!opts?.force && now - lastAdvance < ADVANCE_COOLDOWN_MS) {
     return false;
   }
-  lastAdvanceAtByProject.set(projectId, now);
+  lastAdvanceAtByProject.set(cooldownKey, now);
 
-  await resumeSubmittedStalledTasks(projectId);
-  await resumeStalledInProgressTasks(projectId);
-
-  if (await isProjectPipelineBlocked(projectId)) {
+  const taskIds = await resolveScopedTaskIds(projectId, scope);
+  if (scope?.conversationId && taskIds && !taskIds.length) {
     return false;
   }
 
-  return promptNextImageCollectionTask(projectId);
+  await healDeliverableStuckTasks(projectId);
+  await healDescriptionPauseWithReadyResearch(projectId);
+  await resumeSubmittedStalledTasks(projectId, scope);
+  await resumeStalledInProgressTasks(projectId, scope);
+
+  if (await isProjectPipelineBlocked(projectId, scope)) {
+    return false;
+  }
+
+  return promptNextImageCollectionTask(projectId, scope);
 }

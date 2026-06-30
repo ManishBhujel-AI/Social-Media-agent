@@ -1,60 +1,46 @@
 import { MODELS } from "../models.config";
 import { openRouterChatJSON } from "../openrouter";
 import { prisma } from "@/lib/db/prisma";
-import {
-  formatMarketingBriefForPrompt,
-  formatUserProductNotesForPrompt,
-  formatVisualContextForPrompt,
-  requireMarketingCopyContext,
-} from "../productContext";
+import { requireMarketingCopyContext } from "../productContext";
 import {
   assembleImagePromptSkeleton,
-  formatBrandKitForCaptionPrompt,
   resolveBrandKitForTask,
   type GraphicCopy,
 } from "@/lib/brandKit/formatForPrompt";
-import { formatReferencesForGraphicPrompt, getReferencesForTask } from "@/lib/content/references";
+import { resolvePreferenceContextFromTask } from "@/lib/brandKit/preferences";
+import { generatePostContentForTask } from "../postContent";
+import { getReferencesForTask } from "@/lib/content/references";
+import { appendImagePromptExtras } from "../imagePromptExtras";
 
 export type { GraphicCopy };
 
+/** Fallback when graphic copy is missing — normally created with caption in one LLM call. */
 export async function generateGraphicCopy(taskId: string): Promise<GraphicCopy> {
-  const task = await prisma.task.findUniqueOrThrow({ where: { id: taskId } });
-  const product = requireMarketingCopyContext(task);
-  const kit = await resolveBrandKitForTask(task);
-  const refs = await getReferencesForTask(task.projectId, taskId);
-  const refBlock = formatReferencesForGraphicPrompt(refs);
-  const notesBlock = formatUserProductNotesForPrompt(task.userProductNotes);
-  const summary = product.summary;
-  const visualNote = formatVisualContextForPrompt(summary?.visualContext);
-
-  const copy = await openRouterChatJSON<GraphicCopy>({
-    model: MODELS.promptRefiner.model,
-    messages: [
-      {
-        role: "system",
-        content:
-          'You write on-graphic copy: HEADLINE, SUBHEADLINE, optional BULLET, CTA. Keep it light — push detail into the caption. Headline ≤ ~6 words, benefit-led hook. Do NOT list product specs. Do NOT describe the photo. Match brand tone. Return JSON: { "headline", "subheadline", "bullet"?, "cta" }.',
-      },
-      {
-        role: "user",
-        content: `${formatMarketingBriefForPrompt(product)}${visualNote ? `\n\n${visualNote}` : ""}\n\nPost caption:\n${task.caption ?? ""}\n\n${kit ? formatBrandKitForCaptionPrompt(kit) : "Brand tone: professional"}${notesBlock ? `\n\n${notesBlock}` : ""}${refBlock ? `\n\n${refBlock}` : ""}`,
-      },
-    ],
-  });
-
-  await prisma.task.update({
+  const task = await prisma.task.findUniqueOrThrow({
     where: { id: taskId },
-    data: { graphicCopy: copy as object },
+    select: { graphicCopy: true, caption: true },
   });
 
-  return copy;
+  const existing = task.graphicCopy as GraphicCopy | null;
+  if (existing?.headline && existing.subheadline && existing.cta) {
+    return existing;
+  }
+
+  if (task.caption?.trim()) {
+    throw new Error("Caption exists without graphic copy — re-run writeCaption to regenerate all content");
+  }
+
+  const { graphicCopy } = await generatePostContentForTask(taskId);
+  return graphicCopy;
 }
 
+/** Legacy fallback when imagePrompt was not saved with writeCaption (older posts). */
 export async function generateImagePrompt(taskId: string): Promise<string> {
   const task = await prisma.task.findUniqueOrThrow({ where: { id: taskId } });
+  if (task.imagePrompt?.trim()) return task.imagePrompt.trim();
+
   const product = requireMarketingCopyContext(task);
   const kit = await resolveBrandKitForTask(task);
-
   if (!kit) {
     throw new Error("Brand kit required before generating image prompt");
   }
@@ -65,26 +51,20 @@ export async function generateImagePrompt(taskId: string): Promise<string> {
   }
 
   const refs = await getReferencesForTask(task.projectId, taskId);
-  const styleBlock = formatReferencesForGraphicPrompt(refs);
-  const notesBlock = formatUserProductNotesForPrompt(task.userProductNotes);
-  const visualNote = formatVisualContextForPrompt(product.summary?.visualContext);
-
-  const productDescription = product.marketingBrief;
+  const prefContext = resolvePreferenceContextFromTask(task);
 
   let prompt = assembleImagePromptSkeleton({
     kit,
     graphicCopy,
-    productDescription,
+    productDescription: product.marketingBrief,
+    context: prefContext,
   });
 
-  const sourceImageCount = ((task.sourceImages as string[] | null) ?? []).length;
-  if (sourceImageCount > 1) {
-    prompt += `\n\nUser provided ${sourceImageCount} product photos. The graphic must visibly include all ${sourceImageCount} uploaded product shots in the composition.`;
-  }
-
-  if (visualNote) prompt += `\n\n${visualNote}`;
-  if (notesBlock) prompt += `\n\n${notesBlock}`;
-  if (styleBlock) prompt += `\n\n${styleBlock}`;
+  prompt += appendImagePromptExtras({
+    task,
+    visualContext: product.summary?.visualContext,
+    styleRefs: refs,
+  });
 
   await prisma.task.update({
     where: { id: taskId },

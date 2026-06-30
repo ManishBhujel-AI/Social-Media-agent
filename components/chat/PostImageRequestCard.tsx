@@ -5,6 +5,18 @@ import { GLASS_CARD } from "@/lib/design/tokens";
 import { PostThumbnail } from "@/components/posts/PostThumbnail";
 import { MAX_POST_SOURCE_IMAGES } from "@/lib/ai/imageRefs.config";
 
+export type PhotoCardDraft = {
+  attachedImageIds: string[];
+  contextImageId: string | null;
+  productNotes: string;
+};
+
+const EMPTY_DRAFT: PhotoCardDraft = {
+  attachedImageIds: [],
+  contextImageId: null,
+  productNotes: "",
+};
+
 export function PostImageRequestCard({
   projectId,
   conversationId,
@@ -13,6 +25,8 @@ export function PostImageRequestCard({
   productName,
   orderIndex,
   active,
+  draft,
+  onDraftChange,
   onResponded,
 }: {
   projectId: string;
@@ -22,15 +36,30 @@ export function PostImageRequestCard({
   productName: string;
   orderIndex: number;
   active: boolean;
-  onResponded?: (ackMessage?: string) => void;
+  draft?: PhotoCardDraft;
+  onDraftChange?: (draft: PhotoCardDraft) => void;
+  onResponded?: (ackMessage?: string, taskId?: string) => void;
 }) {
   const [uploading, setUploading] = useState(false);
   const [uploadingContext, setUploadingContext] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [attachedImageIds, setAttachedImageIds] = useState<string[]>([]);
-  const [contextImageId, setContextImageId] = useState<string | null>(null);
-  const [productNotes, setProductNotes] = useState("");
+  const [localDraft, setLocalDraft] = useState<PhotoCardDraft>(EMPTY_DRAFT);
   const [uploadError, setUploadError] = useState<string | null>(null);
+
+  const cardDraft = draft ?? localDraft;
+  const { attachedImageIds, contextImageId, productNotes } = cardDraft;
+
+  const updateDraft = useCallback(
+    (patch: Partial<PhotoCardDraft>) => {
+      const next = { ...cardDraft, ...patch };
+      if (onDraftChange) {
+        onDraftChange(next);
+      } else {
+        setLocalDraft(next);
+      }
+    },
+    [cardDraft, onDraftChange]
+  );
 
   const respond = useCallback(
     async (body: {
@@ -40,7 +69,18 @@ export function PostImageRequestCard({
       contextImageId?: string;
     }) => {
       if (!active || submitting) return;
+
+      const photoCount = body.imageIds?.length ?? 0;
+      const notes = body.productNotes?.trim();
+      const optimisticAck = photoCount
+        ? `Got it — creating this post with ${photoCount} photo${photoCount === 1 ? "" : "s"} in the background.${notes ? " I'll use your notes for this post." : ""}`
+        : notes
+          ? `Got it — designing this post from scratch. I'll use your notes.`
+          : `Got it — designing this post from scratch.`;
+
       setSubmitting(true);
+      setUploadError(null);
+
       try {
         const res = await fetch("/api/chat", {
           method: "POST",
@@ -63,14 +103,27 @@ export function PostImageRequestCard({
             error?: string;
           };
           if (data.error) {
-            onResponded?.(data.error);
+            onResponded?.(data.error, taskId);
+            setUploadError(data.error);
             return;
           }
-          onResponded?.(data.mode === "resume" ? data.message : undefined);
-        } else {
-          await res.text();
-          onResponded?.();
+          onResponded?.(
+            data.mode === "resume" && data.message?.trim()
+              ? data.message.trim()
+              : optimisticAck,
+            taskId
+          );
+          return;
         }
+        if (!res.ok) {
+          onResponded?.("Could not submit — try again.", taskId);
+          setUploadError("Could not submit — try again.");
+          return;
+        }
+        onResponded?.(optimisticAck, taskId);
+      } catch {
+        onResponded?.("Could not submit — try again.", taskId);
+        setUploadError("Could not submit — try again.");
       } finally {
         setSubmitting(false);
       }
@@ -112,9 +165,9 @@ export function PostImageRequestCard({
         newIds.push(imageId);
       }
       if (newIds.length) {
-        setAttachedImageIds((prev) =>
-          [...prev, ...newIds].slice(0, MAX_POST_SOURCE_IMAGES)
-        );
+        updateDraft({
+          attachedImageIds: [...attachedImageIds, ...newIds].slice(0, MAX_POST_SOURCE_IMAGES),
+        });
       }
     } catch {
       setUploadError("Could not upload image.");
@@ -129,7 +182,7 @@ export function PostImageRequestCard({
     setUploadError(null);
     try {
       const imageId = await uploadFile(file);
-      if (imageId) setContextImageId(imageId);
+      if (imageId) updateDraft({ contextImageId: imageId });
     } catch {
       setUploadError("Could not upload info image.");
     } finally {
@@ -138,7 +191,9 @@ export function PostImageRequestCard({
   };
 
   const removeImage = (imageId: string) => {
-    setAttachedImageIds((prev) => prev.filter((id) => id !== imageId));
+    updateDraft({
+      attachedImageIds: attachedImageIds.filter((id) => id !== imageId),
+    });
     setUploadError(null);
   };
 
@@ -244,7 +299,7 @@ export function PostImageRequestCard({
             placeholder="Offers, who it's for, specs, or anything that helps write this post…"
             value={productNotes}
             disabled={!active || busy}
-            onChange={(e) => setProductNotes(e.target.value)}
+            onChange={(e) => updateDraft({ productNotes: e.target.value })}
           />
           <div className="flex items-center gap-2">
             <label
@@ -271,7 +326,7 @@ export function PostImageRequestCard({
               <button
                 type="button"
                 disabled={busy}
-                onClick={() => setContextImageId(null)}
+                onClick={() => updateDraft({ contextImageId: null })}
                 className="text-[11px] text-slate-500 hover:text-slate-800 disabled:opacity-50"
               >
                 Remove info image

@@ -15,7 +15,7 @@ export function HomeEmpty() {
       const res = await fetch("/api/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: "New brief" }),
+        body: JSON.stringify({ name: "New workspace" }),
       });
       if (!res.ok) throw new Error("Failed to create brief");
       const project = await res.json();
@@ -33,7 +33,7 @@ export function HomeEmpty() {
         </div>
         <h1 className="mt-5 text-[19px] font-bold tracking-tight">Brewline Content Studio</h1>
         <p className="mt-2 text-sm text-slate-500 leading-relaxed">
-          No briefs yet. Create one to start planning posts with the agent.
+          No workspaces yet. Create one to start planning posts with the agent.
         </p>
         <button
           type="button"
@@ -41,7 +41,7 @@ export function HomeEmpty() {
           disabled={creating}
           className="mt-6 w-full px-4 py-2.5 rounded-[11px] text-[13px] font-semibold text-white bg-gradient-to-br from-violet-500 to-violet-800 shadow-[0_6px_16px_rgba(124,58,237,0.34)] disabled:opacity-60"
         >
-          {creating ? "Creating…" : "Create your first brief"}
+          {creating ? "Creating…" : "Create your first workspace"}
         </button>
       </div>
     </div>

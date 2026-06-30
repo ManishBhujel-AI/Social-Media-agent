@@ -2,12 +2,16 @@ import { prisma } from "@/lib/db/prisma";
 import { dispatchPipelineJob } from "./dispatch";
 import { isProjectPipelineBlocked } from "./pipelineGate";
 
+function pipelineScopeForTask(task: { conversationId: string | null }) {
+  return task.conversationId ? { conversationId: task.conversationId } : undefined;
+}
+
 export async function startPipelineForTasks(taskIds: string[]) {
   if (taskIds.length === 0) return;
   const task = await prisma.task.findUnique({ where: { id: taskIds[0] } });
   if (!task) return;
 
-  if (await isProjectPipelineBlocked(task.projectId)) {
+  if (await isProjectPipelineBlocked(task.projectId, pipelineScopeForTask(task))) {
     return;
   }
 
@@ -25,7 +29,7 @@ export async function enqueueNextTask(remainingTaskIds: string[]) {
   const task = await prisma.task.findUnique({ where: { id: remainingTaskIds[0] } });
   if (!task) return;
 
-  if (await isProjectPipelineBlocked(task.projectId)) {
+  if (await isProjectPipelineBlocked(task.projectId, pipelineScopeForTask(task))) {
     return;
   }
 

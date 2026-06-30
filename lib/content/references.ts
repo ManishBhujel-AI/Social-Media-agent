@@ -240,24 +240,17 @@ export function collectCopySnippetContext(refs: ContentReference[]): string {
     .join("\n\n");
 }
 
-/** Facts and positioning from pasted captions — used for marketing research enrichment. */
+/** Background facts only — captions live in project captionCorpus. */
+export function collectMarketingResearchFromReferences(refs: ContentReference[]): string {
+  return refs
+    .filter((r) => r.kind === "copy_snippet" && r.text?.trim())
+    .map((r) => r.text!.trim())
+    .join("\n\n");
+}
+
+/** @deprecated Use collectMarketingResearchFromReferences */
 export function collectResearchContextFromReferences(refs: ContentReference[]): string {
-  const parts: string[] = [];
-
-  for (const r of refs) {
-    if (!r.text?.trim()) continue;
-    if (r.kind === "copy_snippet") {
-      parts.push(r.text.trim());
-    }
-    if (r.kind === "caption_example") {
-      const label = r.productHint ?? r.summary;
-      parts.push(
-        `Client-approved caption for ${label} (extract product facts, benefits, audience, and offers — do not invent beyond this):\n${r.text.trim()}`
-      );
-    }
-  }
-
-  return parts.join("\n\n");
+  return collectMarketingResearchFromReferences(refs);
 }
 
 export async function getStyleReferenceImageUrls(

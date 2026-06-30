@@ -11,7 +11,7 @@ import { createPageFetchCache } from "@/lib/web/pageFetchCache";
 import { getPlanningBrandContext } from "@/lib/brandKit/ensureBrandKit";
 import { emitAgentActivity } from "@/lib/chat/agentActivity";
 import { labelForAgentActivity } from "@/lib/chat/agentActivityLabels";
-import { looksLikeInternalJson } from "@/lib/chat/displayMessages";
+import { looksLikeInternalJson, collapseRepeatedAssistantProse } from "@/lib/chat/displayMessages";
 import { ingestUserReference } from "@/lib/content/ingestUserReference";
 import { ensureConfirmedPlanningTasks } from "@/lib/ai/agents/ensurePlanningTasks";
 import { verifyAndSaveProjectLogo } from "./projectLogo";
@@ -25,7 +25,8 @@ const INTERNAL_JSON_FALLBACK = "Logo saved — I'll use it on your graphics.";
 function sanitizeAssistantContent(content: string): string {
   const trimmed = content.trim();
   if (!trimmed) return content;
-  return looksLikeInternalJson(trimmed) ? INTERNAL_JSON_FALLBACK : content;
+  if (looksLikeInternalJson(trimmed)) return INTERNAL_JSON_FALLBACK;
+  return collapseRepeatedAssistantProse(content);
 }
 
 export const PLANNING_TOOLS: ToolDef[] = [
@@ -85,7 +86,7 @@ export const PLANNING_TOOLS: ToolDef[] = [
     function: {
       name: "saveContentReference",
       description:
-        "Explicitly save user-provided copy or style guidance when they ask you to use it for posts. Prefer automatic ingestion for pasted captions; use this when the user says e.g. 'use this tone for all posts'.",
+        "Save user-provided captions or background info to the client's Past captions corpus (one combined file). Pasted captions are usually auto-ingested; use this when the user explicitly asks to save copy for future posts.",
       parameters: {
         type: "object",
         properties: {
@@ -107,9 +108,74 @@ export const PLANNING_TOOLS: ToolDef[] = [
   {
     type: "function",
     function: {
+      name: "proposeSettingsChange",
+      description:
+        "Propose a client settings change for user confirmation. Does NOT apply until the user confirms the card. Use for discrete field updates (colors, avoidColors, contact, businessSummary, etc.). Never silently overwrite settings.",
+      parameters: {
+        type: "object",
+        properties: {
+          summary: { type: "string", description: "Plain-language description of what will be saved" },
+          patches: {
+            type: "array",
+            description:
+              'Slash-separated paths with values, e.g. { path: "avoidColors", value: ["yellow"] } or { path: "productNotes/Daikin", value: "..." }',
+            items: {
+              type: "object",
+              properties: {
+                path: { type: "string" },
+                value: {},
+              },
+              required: ["path", "value"],
+            },
+          },
+        },
+        required: ["summary", "patches"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "proposePreferenceEntry",
+      description:
+        "Propose appending a client preference log entry. User must confirm before it is saved. Use when the user states a durable do/don't or stylistic preference.",
+      parameters: {
+        type: "object",
+        properties: {
+          summary: { type: "string", description: "Short offer text, e.g. Want me to save 'no torches for Zoomlock' to preferences?" },
+          scope: {
+            type: "string",
+            description: 'client, product:NAME, or topic:NAME',
+          },
+          note: { type: "string", description: "The preference note" },
+        },
+        required: ["scope", "note"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "proposeProductNote",
+      description:
+        "Propose saving a per-product quick note. User must confirm before it is saved.",
+      parameters: {
+        type: "object",
+        properties: {
+          summary: { type: "string" },
+          product: { type: "string", description: "Product name key" },
+          note: { type: "string" },
+        },
+        required: ["product", "note"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "createTasks",
       description:
-        "Create one task per confirmed post. Call as soon as the user confirms. Each post needs title, subject/product name, productInfo.name. Do NOT pass product photos — each post gets its own photo upload card in the chat UI.",
+        "Create one task per confirmed post. Call once per confirmed batch — if it returns already_created, do NOT call again. Each post needs title, subject/product name, productInfo.name. Do NOT pass product photos — each post gets its own photo upload card in the chat UI.",
       parameters: {
         type: "object",
         properties: {
@@ -140,15 +206,25 @@ const BRAND_SETUP_PROMPT = `You are Brewline's brand setup assistant. For new cl
 
 Do NOT discuss posts, campaigns, or content plans until brand setup is complete.
 
-Workflow:
+Research-first workflow (do the work before asking the user):
 1. If no website on file, ask for their website URL once, then call ensureBrandKit(url).
-2. If ensureBrandKit fails (site unreachable), call initBrandKit({ description }) using what the user told you.
-3. After ensureBrandKit/initBrandKit, if brand kit is incomplete: tell the user to answer the brand setup card(s) above. Cards ask one question at a time — do NOT repeat those questions in plain text.
-4. Do NOT call createTasks until brand kit is complete.
-5. Logo is optional — if they upload one in chat, call setProjectLogo(imageId). You may mention logo once, briefly. Do NOT ask for product/work photos — those are uploaded later via per-post cards.
-6. Bracketed internal context on user messages (logo verify, references) is for you only — respond naturally in your own words; never paste boilerplate like "Saved your logo".
+2. ensureBrandKit researches the site and fills identity, locations, audience, tone, colors, contact, heritage, products, and a business summary narrative.
+3. If ensureBrandKit fails (site unreachable), call initBrandKit({ description }) using what the user told you.
+4. After research, ask ONLY about fields still missing or uncertain — one short conversational batch, not a long form. Use these lines only for actual gaps:
+   - Colors (if not confident): "I pulled these brand colors from your site — [list]. Any to add or remove? And are there colors you never want used?"
+   - Contact (if missing): "What phone number / handle should appear on the graphics, and any preference for how it looks?"
+   - Audience (if ambiguous): "Who are these posts mainly for — trade pros, or general customers?"
+   - Tone (if unclear): "How should you sound — more polished and formal, or plainspoken and friendly?"
+   - Heritage (if not found): "Anything about your history worth featuring — founding year, family-owned, milestones?"
+   - Avoid list (always worth one ask if not found): "Anything you definitely don't want in your posts — colors, words, imagery?"
+   - References (always offer): "If you have a few past captions or designs you liked, share them — I'll match that style."
+   If research already answered a field, do NOT ask it again.
+5. If brand kit is incomplete, the UI may show brand setup card(s) for structured answers (colors, contact) — do NOT repeat those questions in plain text.
+6. Do NOT call createTasks until brand kit is complete.
+7. Logo is optional — if they upload one in chat, call setProjectLogo(imageId). You may mention logo once, briefly. Do NOT ask for product/work photos — those are uploaded later via per-post cards.
+8. Bracketed internal context on user messages (logo verify, references) is for you only — respond naturally in your own words; never paste boilerplate like "Saved your logo".
 
-Keep messages short and focused on finishing brand setup. Be warm and professional.`;
+Keep messages short. Be warm and professional. The user should answer as little as possible; you fill the rest from research.`;
 
 const PLANNING_PROMPT = `You are Brewline's social content planning agent. Brand setup is already complete — do NOT mention brand kit, Client Settings, website URL, or brand setup unless the user explicitly asks to change brand info.
 
@@ -161,9 +237,12 @@ Workflow:
 6. Welcome pasted old captions, product info, FAQs, and brand voice notes — they are saved automatically and used when writing posts. Welcome style graphic uploads (finished ads, screenshots) for layout inspiration — not product photos.
 7. If the user uploads product photos in chat anyway, politely redirect them to the per-post photo cards. Do not attach chat photos to posts.
 8. If they ask you to save something explicitly, call saveContentReference.
-9. Ask clarifying questions only when needed (product names, post count).
-10. When the user confirms (e.g. "create the posts", "go ahead"), call createTasks immediately — one entry per post. If logo is not on file yet, ask about the logo first (step 2) unless they already declined.
-11. Internal bracketed context on user messages is for you only — respond naturally; never paste "Saved..." boilerplate.
+9. When the user states a durable preference, don't, or stylistic rule (e.g. "never use yellow", "no torches for Zoomlock"), offer to save it via proposePreferenceEntry or proposeProductNote — never silently overwrite settings. A confirm card appears; do not repeat the save question in plain text after proposing.
+10. For discrete settings field changes they request, use proposeSettingsChange — same confirm-first flow.
+11. Ask clarifying questions only when needed (product names, post count).
+12. When the user confirms (e.g. "create the posts", "go ahead"), call createTasks once — one entry per post. If it returns already_created, reply with one short sentence only — do not repeat photo-card instructions. If logo is not on file yet, ask about the logo first (step 2) unless they already declined.
+13. Internal bracketed context on user messages is for you only — respond naturally; never paste "Saved..." boilerplate.
+14. After createTasks succeeds, one brief reply is enough — do not repeat the photo-card explanation multiple times.
 
 Each createTasks post needs: title, subject (product name), productInfo: { name }, orderIndex.
 

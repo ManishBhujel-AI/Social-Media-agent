@@ -86,7 +86,6 @@ export async function getProjectWithBrandKit(projectId: string) {
       clientUrl: true,
       brandKitId: true,
       businessSummary: true,
-      alwaysWebResearch: true,
       brandKit: true,
     },
   });

@@ -62,6 +62,15 @@ export async function buildGraphicReferences(task: GraphicRefTask): Promise<{
   const resolvedRefs = maxRefs > 0 ? await resolveReferenceDataUrls(urlEntries) : [];
   const logoInRefs = resolvedRefs.some((r) => r.role === "logo");
 
+  const productRefCount = resolvedRefs.filter(
+    (r) => r.role === "product" || r.role === "extra"
+  ).length;
+  if (sourceImages.length > 0 && productRefCount === 0) {
+    throw new Error(
+      "Could not load uploaded product photos for graphic generation — try re-uploading."
+    );
+  }
+
   const promptSuffix = buildReferencePromptSuffix(resolvedRefs, {
     logoOmitted,
     hadLogo: Boolean(logoUrl),

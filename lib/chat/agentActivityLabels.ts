@@ -30,6 +30,12 @@ export function labelForAgentActivity(
       return "Setting up brand from your description…";
     case "createTasks":
       return "Creating your posts…";
+    case "proposeSettingsChange":
+      return "Proposing settings change…";
+    case "proposePreferenceEntry":
+      return "Proposing preference…";
+    case "proposeProductNote":
+      return "Proposing product note…";
     default:
       return "Thinking…";
   }

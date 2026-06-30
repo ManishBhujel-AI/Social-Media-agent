@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/prisma";
+import { ensureProjectScopedKit } from "@/lib/brandKit/store";
 
 export async function GET() {
   const projects = await prisma.project.findMany({
@@ -27,10 +28,13 @@ export async function POST(req: NextRequest) {
   const { name } = body;
   const project = await prisma.project.create({
     data: {
-      name: name ?? "New brief",
+      name: name ?? "New workspace",
       conversations: { create: {} },
     },
     include: { conversations: true },
   });
+
+  await ensureProjectScopedKit(project.id);
+
   return NextResponse.json(project);
 }
