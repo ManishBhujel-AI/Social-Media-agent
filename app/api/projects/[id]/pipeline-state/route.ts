@@ -21,13 +21,15 @@ export async function GET(
   const globalPaused = await isProjectPipelinePaused(projectId);
 
   let tasks;
-  let scopedTaskIds: string[] | undefined;
   if (conversationId) {
-    scopedTaskIds = await collectConversationTaskIds(conversationId);
-    tasks =
-      scopedTaskIds.length > 0
-        ? await prisma.task.findMany({ where: { projectId, id: { in: scopedTaskIds } } })
-        : [];
+    tasks = await prisma.task.findMany({ where: { projectId, conversationId } });
+    if (!tasks.length) {
+      const scopedTaskIds = await collectConversationTaskIds(conversationId);
+      tasks =
+        scopedTaskIds.length > 0
+          ? await prisma.task.findMany({ where: { projectId, id: { in: scopedTaskIds } } })
+          : [];
+    }
   } else {
     tasks = await prisma.task.findMany({ where: { projectId } });
   }

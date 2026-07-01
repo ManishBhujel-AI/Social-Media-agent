@@ -1,4 +1,5 @@
 import fs from "fs/promises";
+import { mimeFromPath } from "@/lib/ai/normalizeImageRef";
 import path from "path";
 import { put, head, list } from "@vercel/blob";
 import { createId } from "@paralleldrive/cuid2";
@@ -43,8 +44,9 @@ class LocalStorage implements StorageAdapter {
     const folder = url.includes("/uploads/") ? "uploads" : "generated";
     const filePath = path.join(LOCAL_ROOT, folder, key);
     const buf = await fs.readFile(filePath);
-    const mime = key.endsWith(".png") ? "image/png" : "image/jpeg";
-    return `data:${mime};base64,${buf.toString("base64")}`;
+    const mime = mimeFromPath(key);
+    const safeMime = mime.startsWith("image/") ? mime : "image/jpeg";
+    return `data:${safeMime};base64,${buf.toString("base64")}`;
   }
 
   async exists(key: string): Promise<boolean> {

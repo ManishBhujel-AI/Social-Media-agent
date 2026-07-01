@@ -16,7 +16,11 @@ export default async function ProjectLayout({
   const [project, briefs] = await Promise.all([
     prisma.project.findUnique({
       where: { id },
-      include: { tasks: true },
+      select: {
+        id: true,
+        name: true,
+        tasks: { select: { id: true, status: true } },
+      },
     }),
     prisma.project.findMany({
       orderBy: { createdAt: "desc" },

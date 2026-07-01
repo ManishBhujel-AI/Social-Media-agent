@@ -26,15 +26,25 @@ export function formatColorsForImagePrompt(colors: BrandColor[]): string {
     .join(", ");
 }
 
-/** Slim brand context for post content generation — voice and rules, not full product catalog. */
+/** Brand context for Sonnet — voice, visual rules, narrative, and contact for imagePrompt. */
 export function formatBrandKitForPostContentPrompt(
   kit: BrandKitData,
   context: PreferenceContext = {}
 ): string {
+  const cache = getBusinessSummaryCache(kit);
+  const narrative = resolveBusinessSummaryNarrative(kit, cache);
   const preferencesBlock = formatPreferencesForPrompt(kit, context);
   const productNotesBlock = formatProductNotesForPrompt(kit, context.product);
+  const aspectRatio = kit.aspectRatio?.trim() || "1:1";
+  const colorsLine = kit.colors.length ? formatColorsForImagePrompt(kit.colors) : "";
+  const avoidLine = kit.avoidColors.length > 0 ? kit.avoidColors.join(", ") : "";
+  const contactLine = kit.contact?.trim()
+    ? `Phone for on-graphic: ${kit.contact.trim()}${kit.contactStyle?.trim() ? ` — ${kit.contactStyle.trim()}` : ""}`
+    : null;
 
   const lines = [
+    narrative ? `BUSINESS SUMMARY:\n${narrative}` : null,
+    narrative ? "" : null,
     "BRAND DETAILS:",
     kit.businessName ? `Business: ${kit.businessName}` : null,
     kit.businessType ? `Type: ${kit.businessType}` : null,
@@ -43,6 +53,12 @@ export function formatBrandKitForPostContentPrompt(
     kit.heritage ? `Heritage: ${kit.heritage}` : null,
     kit.themeWords ? `Theme / feel: ${kit.themeWords}` : null,
     kit.location ? `Location: ${kit.location}` : null,
+    `Graphic format: professional social post (${aspectRatio})`,
+    colorsLine ? `- Colors to use: ${colorsLine}` : null,
+    avoidLine
+      ? `- DO NOT use ${avoidLine} anywhere — not in text, fonts, or accents.`
+      : null,
+    contactLine,
     preferencesBlock || null,
     productNotesBlock || null,
     "",

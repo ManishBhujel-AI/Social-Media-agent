@@ -8,6 +8,11 @@ import { generateImagePrompt } from "./promptRefiner";
 import { generatePostContentForTask } from "../postContent";
 import { RetryableError } from "../errors";
 import { buildGraphicReferences } from "../graphicReferences";
+import { assembleImageModelPrompt } from "../imageModelPrompt";
+import {
+  loadGraphicCopyForTask,
+  resolveBrandKitForTask,
+} from "@/lib/brandKit/formatForPrompt";
 import { withTransientRetry } from "@/lib/db/transientRetry";
 
 const makingGraphicTaskIds = new Set<string>();
@@ -143,16 +148,29 @@ async function makeGraphicForTaskInner(taskId: string): Promise<string> {
     }
   }
 
-  let imagePrompt = task.imagePrompt;
-  if (!imagePrompt) {
+  let creativeBrief = task.imagePrompt;
+  if (!creativeBrief) {
     if (!task.graphicCopy) {
       throw new Error("Task has no graphic copy — run writeCaption first");
     }
-    imagePrompt = await generateImagePrompt(taskId);
+    creativeBrief = await generateImagePrompt(taskId);
   }
 
-  const { referenceImageUrls, promptSuffix } = await buildGraphicReferences(task);
-  const prompt = imagePrompt + promptSuffix;
+  const kit = await resolveBrandKitForTask(task);
+  if (!kit) throw new Error("Brand kit required for graphic generation");
+
+  const graphicCopy = await loadGraphicCopyForTask(taskId);
+  if (!graphicCopy) {
+    throw new Error("Task has no graphic copy — run writeCaption first");
+  }
+
+  const { referenceImageUrls, resolvedRefs } = await buildGraphicReferences(task);
+  const prompt = assembleImageModelPrompt({
+    creativeBrief,
+    graphicCopy,
+    kit,
+    refs: resolvedRefs,
+  });
 
   let genDbId: string;
   let generationId: string;

@@ -57,7 +57,7 @@ const POST_TOOLS: ToolDef[] = [
     function: {
       name: "writeCaption",
       description:
-        "One LLM call: Facebook caption, on-graphic copy (headline/subheadline/CTA), and creative image scene. Brand rules are appended in code.",
+        "One LLM call: Facebook caption, on-graphic copy, and creative brief (imagePrompt). App appends copy and brand rules at image generation.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -97,8 +97,8 @@ const SYSTEM_PROMPT = `You are Brewline's per-post content agent. For this Faceb
    - If choice is "upload" or imageUrls present: user attached photo(s) — call writeCaption then makeGraphic unless needsDescription is true in the tool result.
    - If choice is "generate" or user said generate: call writeCaption then makeGraphic without expecting a product photo.
    - Otherwise follow the user's text answer.
-5. writeCaption() — one LLM call returns caption, graphicCopy, and creative imagePrompt; code appends brand scaffold (colors, contact, rules) before saving. Requires product info (Perplexity research, site copy, or user description).
-6. makeGraphic() — sends the saved imagePrompt to the image model with logo + product photos. No additional text LLM call.
+5. writeCaption() — one LLM call returns caption, graphicCopy, and imagePrompt (creative brief). Requires product info (Perplexity research, site copy, or user description).
+6. makeGraphic() — appends on-graphic copy and brand rules to the creative brief, then sends to the image model with logo + uploaded product photos.
 
 You MUST finish every post with writeCaption then makeGraphic. Call askUser ONLY when findProduct explicitly returns needsDescription, noUsableImage, or found:false — never because description is empty when readyForCaption is true. NEVER end with a plain-text reply.
 
@@ -112,7 +112,7 @@ async function buildPostSystemPrompt(projectId: string): Promise<string> {
 
 const STATUS_LABELS: Record<string, string> = {
   findProduct: "Creating post — researching product…",
-  writeCaption: "Creating post — writing caption, graphic copy & scene…",
+  writeCaption: "Creating post — writing caption, graphic copy & image brief…",
   makeGraphic: "Creating post — designing graphic…",
   askUser: "Creating post — need your input…",
   imageRequest: "Waiting for photo…",

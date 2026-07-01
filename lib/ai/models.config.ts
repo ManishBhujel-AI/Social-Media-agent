@@ -3,8 +3,9 @@
 export const MODELS = {
   chatAgent: { model: "google/gemini-2.5-pro" },
   vision: { model: "google/gemini-2.5-flash" },
-  caption: { model: "anthropic/claude-sonnet-4.6" },
-  promptRefiner: { model: "anthropic/claude-sonnet-4.6" },
+  caption: { model: "openai/gpt-5.5" },
+  promptRefiner: { model: "openai/gpt-5.5" },
   image: { model: "openai/gpt-image-2" },
+  imageFeedback: { model: "openai/gpt-image-2" },
   research: { model: "perplexity/sonar" },
 } as const;

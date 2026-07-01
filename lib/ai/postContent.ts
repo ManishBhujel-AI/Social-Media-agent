@@ -1,6 +1,7 @@
 import { MODELS } from "./models.config";
 import { openRouterChatJSON } from "./openrouter";
 import { prisma } from "@/lib/db/prisma";
+import type { Task } from "@prisma/client";
 import {
   formatProductInfoForPrompt,
   formatUserProductNotesForPrompt,
@@ -8,28 +9,23 @@ import {
   requireMarketingCopyContext,
 } from "./productContext";
 import {
-  assembleFinalImagePrompt,
   formatBrandKitForPostContentPrompt,
   resolveBrandKitForTask,
   type GraphicCopy,
 } from "@/lib/brandKit/formatForPrompt";
 import { resolvePreferenceContextFromTask } from "@/lib/brandKit/preferences";
-import {
-  CAPTION_UNIVERSAL_RULES,
-  GRAPHIC_COPY_SYSTEM_RULES,
-  sanitizeGraphicCopy,
-} from "./generationRules";
-import {
-  formatCaptionCorpusForPrompt,
-  getCaptionCorpus,
-  hashtagGuidanceFromCorpus,
-} from "@/lib/content/captionCorpus";
+import { sanitizeGraphicCopy } from "./generationRules";
+import { formatCaptionCorpusForPrompt, getCaptionCorpus } from "@/lib/content/captionCorpus";
 import { formatReferencesForGraphicPrompt, getReferencesForTask } from "@/lib/content/references";
-import { appendImagePromptExtras } from "./imagePromptExtras";
 import {
   isCompletePostContent,
   normalizePostContentPayload,
 } from "./normalizePostContent";
+import {
+  POST_CONTENT_REPAIR_SUFFIX,
+  POST_CONTENT_SYSTEM_PROMPT,
+  POST_CONTENT_USER_FRAMING,
+} from "./postContentPrompts";
 
 export type PostContentResponse = {
   caption: string;
@@ -39,7 +35,7 @@ export type PostContentResponse = {
     bullet?: string;
     cta: string;
   };
-  /** Creative scene only — background, mood, product arrangement. No hex codes, contact, or rules. */
+  /** Creative brief only — app appends on-graphic copy and brand rules at makeGraphic. */
   imagePrompt: string;
 };
 
@@ -49,43 +45,24 @@ export type PostContentResult = {
   imagePrompt: string;
 };
 
-const POST_TOPIC_RULES = `POST TOPIC RULES (highest priority):
-- Write about the product/service named in POST TOPIC only.
-- Do not write about other products the client carries, even if they appear in CLIENT BACKGROUND or past captions.
-- Graphic headline, subheadline, bullet, and caption must all be about the POST TOPIC product.`;
+export type PostContentPromptBundle = {
+  systemPrompt: string;
+  userContent: string;
+  productName: string;
+};
 
-const POST_CONTENT_SYSTEM_PROMPT = `You write a complete social post package in one pass for ONE post only.
+function uploadedPhotoHint(task: Pick<Task, "sourceImages">): string | null {
+  const uploadedPhotoCount = ((task.sourceImages as string[] | null) ?? []).length;
+  if (uploadedPhotoCount === 0) return null;
+  return uploadedPhotoCount > 1
+    ? `USER UPLOADED ${uploadedPhotoCount} PRODUCT PHOTOS for this post. Caption, graphicCopy, and imagePrompt must match what is shown in those photos. imagePrompt must compose the layout around the provided photos — do not invent a different product appearance.`
+    : "USER UPLOADED A PRODUCT PHOTO for this post. Caption, graphicCopy, and imagePrompt must match what is shown in that photo. imagePrompt must compose the layout around the provided photo — do not invent a different product appearance.";
+}
 
-OUTPUT FORMAT (critical):
-- Reply with a single raw JSON object — no markdown, no code fences, no preamble, no arrays of posts.
-- Exactly these top-level keys: { "caption", "graphicCopy": { "headline", "subheadline", "bullet"?, "cta" }, "imagePrompt" }
-
-${POST_TOPIC_RULES}
-
-CAPTION:
-${CAPTION_UNIVERSAL_RULES}
-Open with a hook, lead with customer benefit, include a light CTA, end with hashtags.
-Do NOT describe the product image — the graphic handles visuals.
-Do NOT invent specs not in the product info or client detail.
-
-GRAPHIC COPY (on-image text):
-${GRAPHIC_COPY_SYSTEM_RULES}
-Keep on-graphic text light — push detail into the caption. Headline and subheadline must align with the caption and the POST TOPIC product.
-
-IMAGE PROMPT (creative scene only — 2-4 sentences):
-Describe background, mood, layout, and product arrangement for THIS specific post so the design feels fresh, not templated.
-Do NOT include hex color codes, contact phone numbers, brand rules, or the exact on-graphic copy text — the app appends those deterministically.
-Focus on: setting, atmosphere, how product photos are composed, decorative elements, local/seasonal cues when relevant.`;
-
-const REPAIR_SUFFIX =
-  "Return exactly ONE JSON object for this post only. Keys required: caption (non-empty string), graphicCopy { headline, subheadline, cta, bullet? }, imagePrompt (non-empty string). No markdown, no arrays, no multiple posts.";
-
-/**
- * Single LLM call: caption + graphicCopy + creative imagePrompt.
- * Final image prompt = LLM creative scene + code-appended brand scaffold.
- */
-export async function generatePostContentForTask(taskId: string): Promise<PostContentResult> {
-  const task = await prisma.task.findUniqueOrThrow({ where: { id: taskId } });
+/** Build Sonnet system + user messages. Keeps all existing data blocks; prepends Creative Director framing. */
+export async function buildPostContentPromptsForTask(
+  task: Task
+): Promise<PostContentPromptBundle> {
   const product = requireMarketingCopyContext(task);
   const kit = await resolveBrandKitForTask(task);
   if (!kit) {
@@ -95,35 +72,42 @@ export async function generatePostContentForTask(taskId: string): Promise<PostCo
   const prefContext = resolvePreferenceContextFromTask(task);
   const corpus = await getCaptionCorpus(task.projectId);
   const pastContentBlock = formatCaptionCorpusForPrompt(corpus);
-  const refs = await getReferencesForTask(task.projectId, taskId);
+  const refs = await getReferencesForTask(task.projectId, task.id);
   const styleImageBlock = formatReferencesForGraphicPrompt(refs);
   const notesBlock = formatUserProductNotesForPrompt(task.userProductNotes);
   const visualNote = formatVisualContextForPrompt(product.summary?.visualContext);
   const brandContext = formatBrandKitForPostContentPrompt(kit, prefContext);
-  const uploadedPhotoCount = ((task.sourceImages as string[] | null) ?? []).length;
-  const uploadedPhotoHint =
-    uploadedPhotoCount > 0
-      ? uploadedPhotoCount > 1
-        ? `USER UPLOADED ${uploadedPhotoCount} PRODUCT PHOTOS for this post. Caption, graphicCopy, and imagePrompt must match what is shown in those photos. imagePrompt must compose the layout around the provided photos — do not invent a different product appearance.`
-        : "USER UPLOADED A PRODUCT PHOTO for this post. Caption, graphicCopy, and imagePrompt must match what is shown in that photo. imagePrompt must compose the layout around the provided photo — do not invent a different product appearance."
-      : null;
 
-  const systemPrompt = `${POST_CONTENT_SYSTEM_PROMPT}\n\n${hashtagGuidanceFromCorpus(corpus)}`;
   const userContent = [
+    POST_CONTENT_USER_FRAMING,
     formatProductInfoForPrompt({ name: product.name, summary: product.summary }),
     visualNote || null,
     brandContext
       ? `CLIENT BACKGROUND (who they are — NOT the post topic):\n${brandContext}`
       : null,
     notesBlock ? `USER-PROVIDED DETAIL FOR THIS POST:\n${notesBlock}` : null,
-    uploadedPhotoHint,
+    uploadedPhotoHint(task),
     pastContentBlock || null,
     styleImageBlock || null,
     `POST TOPIC (write about this product only): ${product.name}`,
-    "Write caption, graphicCopy, and imagePrompt together so they complement each other.",
   ]
     .filter(Boolean)
     .join("\n\n");
+
+  return {
+    systemPrompt: POST_CONTENT_SYSTEM_PROMPT,
+    userContent,
+    productName: product.name,
+  };
+}
+
+/**
+ * Single LLM call: caption + graphicCopy + imagePrompt.
+ * imagePrompt is the creative brief only; makeGraphic appends graphic copy and brand rules.
+ */
+export async function generatePostContentForTask(taskId: string): Promise<PostContentResult> {
+  const task = await prisma.task.findUniqueOrThrow({ where: { id: taskId } });
+  const { systemPrompt, userContent, productName } = await buildPostContentPromptsForTask(task);
 
   let payload = normalizePostContentPayload(
     await openRouterChatJSON<unknown>({
@@ -133,7 +117,7 @@ export async function generatePostContentForTask(taskId: string): Promise<PostCo
         { role: "user", content: userContent },
       ],
     }),
-    product.name
+    productName
   );
 
   if (!isCompletePostContent(payload)) {
@@ -142,10 +126,10 @@ export async function generatePostContentForTask(taskId: string): Promise<PostCo
         model: MODELS.caption.model,
         messages: [
           { role: "system", content: systemPrompt },
-          { role: "user", content: `${userContent}\n\n${REPAIR_SUFFIX}` },
+          { role: "user", content: `${userContent}\n\n${POST_CONTENT_REPAIR_SUFFIX}` },
         ],
       }),
-      product.name
+      productName
     );
   }
 
@@ -164,21 +148,7 @@ export async function generatePostContentForTask(taskId: string): Promise<PostCo
 
   const caption = payload.caption.trim();
   const graphicCopy = sanitizeGraphicCopy(payload.graphicCopy);
-  const creativeScene = payload.imagePrompt.trim();
-
-  let imagePrompt = assembleFinalImagePrompt({
-    creativeScene,
-    kit,
-    graphicCopy,
-    productDescription: product.marketingBrief,
-    context: prefContext,
-  });
-
-  imagePrompt += appendImagePromptExtras({
-    task,
-    visualContext: product.summary?.visualContext,
-    styleRefs: refs,
-  });
+  const imagePrompt = payload.imagePrompt.trim();
 
   await prisma.task.update({
     where: { id: taskId },

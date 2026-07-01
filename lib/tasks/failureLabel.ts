@@ -15,8 +15,8 @@ export function formatTaskFailureLabel(error: string): string {
   if (/Brand kit is incomplete/i.test(error)) {
     return "Brand kit incomplete — finish setup in Settings, then retry";
   }
-  if (/Task has no caption/i.test(error)) {
-    return "Post stopped before caption was written — retry";
+  if (/Invalid image file/i.test(error)) {
+    return "Graphic failed — use JPG, PNG, or WEBP photos only (AVIF not supported), then retry";
   }
   const trimmed = error.replace(/\s+/g, " ").trim();
   if (!trimmed) return "Failed — retry";

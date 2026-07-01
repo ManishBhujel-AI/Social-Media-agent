@@ -9,16 +9,8 @@ import type { BriefSummary } from "@/lib/types/brief";
 import { BriefRow } from "@/components/shell/BriefRow";
 import { ProjectStreamProvider } from "@/hooks/ProjectStreamProvider";
 import { useProjectStream, type TaskStreamEvent } from "@/hooks/useProjectStream";
+import { isPipelineActiveStatuses } from "@/lib/tasks/pipelineActive";
 import type { TaskStatus } from "@prisma/client";
-
-const TERMINAL_TASK_STATUSES: TaskStatus[] = ["NEEDS_APPROVAL", "APPROVED", "FAILED"];
-
-function isPipelineActive(statuses: Iterable<TaskStatus>): boolean {
-  for (const status of Array.from(statuses)) {
-    if (!TERMINAL_TASK_STATUSES.includes(status)) return true;
-  }
-  return false;
-}
 
 const NAV = [
   { key: "chat", label: "Chat", icon: "✦", segment: "chat" as const },
@@ -106,9 +98,7 @@ function AppShellInner({
   const [creating, setCreating] = useState(false);
   const [localBriefs, setLocalBriefs] = useState(briefs);
   const [liveCounts, setLiveCounts] = useState({ taskCount, needsCount });
-  const [pollCounts, setPollCounts] = useState(() =>
-    isPipelineActive(initialTaskStatuses.map((t) => t.status))
-  );
+  const [pollCounts, setPollCounts] = useState(false);
   const taskStatusRef = useRef<Map<string, TaskStatus>>(
     new Map(initialTaskStatuses.map((t) => [t.id, t.status]))
   );
@@ -116,7 +106,6 @@ function AppShellInner({
   useEffect(() => {
     taskStatusRef.current = new Map(initialTaskStatuses.map((t) => [t.id, t.status]));
     setLiveCounts({ taskCount, needsCount });
-    setPollCounts(isPipelineActive(initialTaskStatuses.map((t) => t.status)));
   }, [projectId, initialTaskStatuses, taskCount, needsCount]);
 
   const onTaskEvent = useCallback(
@@ -138,13 +127,13 @@ function AppShellInner({
         taskCount: c.taskCount + 1,
         needsCount: c.needsCount + (status === "NEEDS_APPROVAL" ? 1 : 0),
       }));
-      setPollCounts(isPipelineActive(taskStatusRef.current.values()));
+      setPollCounts(isPipelineActiveStatuses(taskStatusRef.current.values()));
       return;
     }
 
     if (prev === undefined) {
       taskStatusRef.current.set(taskId, status);
-      setPollCounts(isPipelineActive(taskStatusRef.current.values()));
+      setPollCounts(isPipelineActiveStatuses(taskStatusRef.current.values()));
       return;
     }
 
@@ -171,9 +160,13 @@ function AppShellInner({
           cache: "no-store",
         });
         if (!res.ok || cancelled) return;
-        const data = (await res.json()) as { taskCount: number; needsCount: number };
+        const data = (await res.json()) as {
+          taskCount: number;
+          needsCount: number;
+          pipelineActive?: boolean;
+        };
         setLiveCounts({ taskCount: data.taskCount, needsCount: data.needsCount });
-        setPollCounts(data.taskCount > 0);
+        setPollCounts(Boolean(data.pipelineActive));
       } catch {
         /* ignore */
       }

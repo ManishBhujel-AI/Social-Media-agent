@@ -15,17 +15,27 @@ export async function GET(
 
   let tasks;
   if (conversationParam && conversationId) {
-    const ids = await collectConversationTaskIds(conversationId);
-    tasks =
-      ids.length > 0
-        ? await prisma.task.findMany({
-            where: { projectId: id, id: { in: ids } },
-            orderBy: { orderIndex: "asc" },
-            include: {
-              generations: { orderBy: { createdAt: "desc" }, take: 1 },
-            },
-          })
-        : [];
+    tasks = await prisma.task.findMany({
+      where: { projectId: id, conversationId },
+      orderBy: { orderIndex: "asc" },
+      include: {
+        generations: { orderBy: { createdAt: "desc" }, take: 1 },
+      },
+    });
+
+    if (!tasks.length) {
+      const ids = await collectConversationTaskIds(conversationId);
+      tasks =
+        ids.length > 0
+          ? await prisma.task.findMany({
+              where: { projectId: id, id: { in: ids } },
+              orderBy: { orderIndex: "asc" },
+              include: {
+                generations: { orderBy: { createdAt: "desc" }, take: 1 },
+              },
+            })
+          : [];
+    }
   } else {
     tasks = await prisma.task.findMany({
       where: { projectId: id },

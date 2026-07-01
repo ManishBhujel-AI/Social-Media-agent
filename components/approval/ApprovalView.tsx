@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import type { Generation, Task } from "@prisma/client";
 import { GLASS_CARD, PAGE_PADDING } from "@/lib/design/tokens";
 import { PostThumbnail } from "@/components/posts/PostThumbnail";
+import { CopyTextButton } from "@/components/posts/CopyTextButton";
+import { DownloadImageButton } from "@/components/posts/DownloadImageButton";
 import { useProjectStream } from "@/hooks/useProjectStream";
 import { MAX_FEEDBACK_REFERENCE_IMAGES } from "@/lib/ai/imageRefs.config";
 
@@ -12,6 +14,14 @@ type TaskFull = Task & {
   generations: Generation[];
   captionRevisions: { caption: string; feedback: string | null }[];
 };
+
+function slugify(value: string): string {
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || "post";
+}
 
 function ImageAttachIcon({ className = "w-5 h-5" }: { className?: string }) {
   return (
@@ -284,6 +294,15 @@ function ApprovalCard({
               imageKey={current?.generationId ?? current?.id}
             />
           </div>
+          {current?.imagePath ? (
+            <div className="mt-2 flex justify-center">
+              <DownloadImageButton
+                imageUrl={current.imagePath}
+                filename={`${slugify(task.title)}-v${selectedVersion + 1}.png`}
+                label={`Download graphic v${selectedVersion + 1}`}
+              />
+            </div>
+          ) : null}
           {gens.length > 1 && (
             <div className="mt-2 flex gap-1.5">
               {gens.map((g, i) => (
@@ -304,9 +323,14 @@ function ApprovalCard({
           )}
         </div>
         <div className="flex-1 min-w-0 min-h-0 py-4 pr-4 pl-1 flex flex-col">
-          <div className="flex justify-between gap-2 flex-none">
+          <div className="flex justify-between gap-2 flex-none items-start">
             <div className="text-[15px] font-bold">{task.title}</div>
-            <span className="text-[11px] font-semibold text-slate-400">Post {task.orderIndex + 1}</span>
+            <div className="flex items-center gap-2 flex-none">
+              {task.caption?.trim() ? (
+                <CopyTextButton text={task.caption} label="Copy caption" />
+              ) : null}
+              <span className="text-[11px] font-semibold text-slate-400">Post {task.orderIndex + 1}</span>
+            </div>
           </div>
           <div className="mt-2.5 flex-1 min-h-0 overflow-y-auto text-[13px] leading-relaxed text-slate-700 whitespace-pre-wrap pr-1">
             {task.caption ?? "Caption pending…"}

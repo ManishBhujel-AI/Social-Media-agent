@@ -61,7 +61,7 @@ async function main() {
     project: anchor.project.name,
     exportedAt: new Date().toISOString(),
     modelNote: {
-      sonnetModel: "anthropic/claude-sonnet-4.6 (MODELS.caption)",
+      sonnetModel: "openai/gpt-5.5 (MODELS.caption)",
       imageModel: "openai/gpt-image-2 (MODELS.image)",
       sonnetCreativeScene:
         "The creative scene — 2–4 sentences Sonnet returns as imagePrompt in the post-content JSON.",
@@ -89,7 +89,7 @@ async function main() {
     "",
     "## How prompts are built",
     "",
-    "1. **Sonnet 4.6** (`writeCaption`) returns a creative `imagePrompt` (scene/layout only).",
+    "1. **GPT-5.5** (`writeCaption`) returns a creative `imagePrompt` (scene/layout only).",
     "2. **App code** appends brand scaffold (colors, copy, contact, rules) → saved as `Task.imagePrompt`.",
     "3. **At `makeGraphic`**, reference-image suffix is appended → saved as `Generation.prompt`.",
     "4. **GPT Image 2** receives `Generation.prompt` text + product/logo photos as image attachments.",

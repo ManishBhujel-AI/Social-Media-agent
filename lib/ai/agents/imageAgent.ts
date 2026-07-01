@@ -1,18 +1,17 @@
 import { createId } from "@paralleldrive/cuid2";
 import { getImageProvider } from "../imageProvider";
+import { MODELS } from "../models.config";
 import { getStorage } from "@/lib/storage";
 import { prisma } from "@/lib/db/prisma";
 import { RetryableError } from "../errors";
 import { buildGraphicReferences } from "../graphicReferences";
-import { MAX_IMAGE_REFS, MAX_FEEDBACK_REFERENCE_IMAGES } from "../imageRefs.config";
+import { assembleImageModelPrompt } from "../imageModelPrompt";
+import { MAX_FEEDBACK_REFERENCE_IMAGES } from "../imageRefs.config";
 import {
-  assembleImagePromptSkeleton,
   loadGraphicCopyForTask,
-  productOneLinerFromTask,
   resolveBrandKitForTask,
 } from "@/lib/brandKit/formatForPrompt";
 import { generateGraphicCopy } from "./promptRefiner";
-import { resolvePreferenceContextFromTask } from "@/lib/brandKit/preferences";
 
 function capFeedbackRefs(urls?: string[]): string[] {
   return (urls ?? []).slice(0, MAX_FEEDBACK_REFERENCE_IMAGES);
@@ -52,6 +51,7 @@ export async function editImage(params: {
     originalImageUrl: dataUrl,
     instruction: params.instruction,
     referenceImageUrls: capFeedbackRefs(params.feedbackReferenceUrls),
+    model: MODELS.imageFeedback.model,
   });
 
   const saved = await storage.saveGenerated(buffer, "image/png", `${generationId}.png`);
@@ -85,28 +85,34 @@ export async function regenerateImage(params: {
     include: { project: true },
   });
 
+  const baseBrief = task.imagePrompt?.trim();
+  if (!baseBrief) {
+    throw new Error("Task has no image prompt — run writeCaption first");
+  }
+
   const kit = await resolveBrandKitForTask(task);
-  if (!kit) throw new Error("Brand kit required for full regenerate");
+  if (!kit) throw new Error("Brand kit required for graphic generation");
 
   let graphicCopy = await loadGraphicCopyForTask(params.taskId);
   if (!graphicCopy) {
-    graphicCopy = await generateGraphicCopy(params.taskId);
+    await generateGraphicCopy(params.taskId);
+    graphicCopy = await loadGraphicCopyForTask(params.taskId);
+  }
+  if (!graphicCopy) {
+    throw new Error("Task has no graphic copy — run writeCaption first");
   }
 
-  const basePrompt = assembleImagePromptSkeleton({
-    kit,
-    graphicCopy,
-    productDescription: productOneLinerFromTask(task),
-    context: resolvePreferenceContextFromTask(task),
-  });
-
-  const { referenceImageUrls, promptSuffix } = await buildGraphicReferences(task);
+  const { referenceImageUrls, resolvedRefs } = await buildGraphicReferences(task);
   const feedbackRefs = capFeedbackRefs(params.feedbackReferenceUrls);
-  const slotsForProduct = Math.max(0, MAX_IMAGE_REFS - feedbackRefs.length);
-  const productRefs = referenceImageUrls.slice(0, slotsForProduct);
-  const allRefs = [...feedbackRefs, ...productRefs];
+  const allRefs = [...feedbackRefs, ...referenceImageUrls];
 
-  let prompt = `${basePrompt}\n\nUSER REQUESTED CHANGES:\n${params.prompt}${promptSuffix}`;
+  let prompt = assembleImageModelPrompt({
+    creativeBrief: baseBrief,
+    graphicCopy,
+    kit,
+    refs: resolvedRefs,
+  });
+  prompt += `\n\nUSER REQUESTED CHANGES:\n${params.prompt}`;
   if (feedbackRefs.length) {
     prompt +=
       feedbackRefs.length > 1
@@ -132,6 +138,7 @@ export async function regenerateImage(params: {
     prompt,
     referenceImageUrl: allRefs[0],
     referenceImageUrls: allRefs.length > 1 ? allRefs : undefined,
+    model: MODELS.imageFeedback.model,
   });
   const storage = getStorage();
   const saved = await storage.saveGenerated(buffer, "image/png", `${generationId}.png`);

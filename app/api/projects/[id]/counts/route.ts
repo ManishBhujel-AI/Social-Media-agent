@@ -4,6 +4,7 @@ import {
   countTasksForConversation,
   resolveProjectConversation,
 } from "@/lib/conversations/conversationTasks";
+import { isPipelineActiveStatus } from "@/lib/tasks/pipelineActive";
 
 export const dynamic = "force-dynamic";
 
@@ -28,5 +29,6 @@ export async function GET(
   return NextResponse.json({
     taskCount: tasks.length,
     needsCount: tasks.filter((t) => t.status === "NEEDS_APPROVAL").length,
+    pipelineActive: tasks.some((t) => isPipelineActiveStatus(t.status)),
   });
 }

@@ -1,16 +1,8 @@
 import { MODELS } from "../models.config";
 import { openRouterChatJSON } from "../openrouter";
 import { prisma } from "@/lib/db/prisma";
-import { requireMarketingCopyContext } from "../productContext";
-import {
-  assembleImagePromptSkeleton,
-  resolveBrandKitForTask,
-  type GraphicCopy,
-} from "@/lib/brandKit/formatForPrompt";
-import { resolvePreferenceContextFromTask } from "@/lib/brandKit/preferences";
 import { generatePostContentForTask } from "../postContent";
-import { getReferencesForTask } from "@/lib/content/references";
-import { appendImagePromptExtras } from "../imagePromptExtras";
+import type { GraphicCopy } from "@/lib/brandKit/formatForPrompt";
 
 export type { GraphicCopy };
 
@@ -34,43 +26,13 @@ export async function generateGraphicCopy(taskId: string): Promise<GraphicCopy> 
   return graphicCopy;
 }
 
-/** Legacy fallback when imagePrompt was not saved with writeCaption (older posts). */
+/** Fallback when imagePrompt was not saved with writeCaption (older posts). */
 export async function generateImagePrompt(taskId: string): Promise<string> {
   const task = await prisma.task.findUniqueOrThrow({ where: { id: taskId } });
   if (task.imagePrompt?.trim()) return task.imagePrompt.trim();
 
-  const product = requireMarketingCopyContext(task);
-  const kit = await resolveBrandKitForTask(task);
-  if (!kit) {
-    throw new Error("Brand kit required before generating image prompt");
-  }
-
-  let graphicCopy = task.graphicCopy as GraphicCopy | null;
-  if (!graphicCopy || typeof graphicCopy !== "object" || !graphicCopy.headline) {
-    graphicCopy = await generateGraphicCopy(taskId);
-  }
-
-  const refs = await getReferencesForTask(task.projectId, taskId);
-  const prefContext = resolvePreferenceContextFromTask(task);
-
-  let prompt = assembleImagePromptSkeleton({
-    kit,
-    graphicCopy,
-    productDescription: product.marketingBrief,
-    context: prefContext,
-  });
-
-  prompt += appendImagePromptExtras({
-    task,
-    visualContext: product.summary?.visualContext,
-    styleRefs: refs,
-  });
-
-  await prisma.task.update({
-    where: { id: taskId },
-    data: { imagePrompt: prompt },
-  });
-  return prompt;
+  const { imagePrompt } = await generatePostContentForTask(taskId);
+  return imagePrompt;
 }
 
 export type FeedbackResult = {
